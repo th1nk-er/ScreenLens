@@ -2,4 +2,4 @@
 
 package main
 
-const buildMode = "gui"
+const buildMode = buildModeGUI

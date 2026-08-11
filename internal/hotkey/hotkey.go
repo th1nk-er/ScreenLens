@@ -8,6 +8,13 @@ import (
 	hook "github.com/robotn/gohook"
 )
 
+const (
+	noMouseButton     uint16 = 0
+	mouseButtonX1     uint16 = 4
+	mouseButtonX2     uint16 = 5
+	minimumHotkeyKeys        = 2
+)
+
 type Listener struct {
 	keys        []string
 	mouseButton uint16
@@ -27,7 +34,7 @@ func New(combination string) (*Listener, error) {
 // Run blocks until ctx is cancelled. The callback only publishes a workflow
 // event; screenshot and network work stays outside the global hook callback.
 func (l *Listener) Run(ctx context.Context, onCapture func()) error {
-	if l.mouseButton != 0 {
+	if l.mouseButton != noMouseButton {
 		hook.Register(hook.MouseDown, nil, func(event hook.Event) {
 			if event.Button == l.mouseButton && onCapture != nil {
 				onCapture()
@@ -62,11 +69,11 @@ func parseMouseButton(value string) (uint16, bool) {
 	value = strings.ReplaceAll(value, "-", "_")
 	switch value {
 	case "mouse_x1", "mouse4", "mouse_button4", "xbutton1", "side1", "back":
-		return 4, true
+		return mouseButtonX1, true
 	case "mouse_x2", "mouse5", "mouse_button5", "xbutton2", "side2", "forward":
-		return 5, true
+		return mouseButtonX2, true
 	default:
-		return 0, false
+		return noMouseButton, false
 	}
 }
 
@@ -92,7 +99,7 @@ func parseCombination(value string) ([]string, error) {
 		seen[key] = struct{}{}
 		keys = append(keys, key)
 	}
-	if len(keys) < 2 {
+	if len(keys) < minimumHotkeyKeys {
 		return nil, fmt.Errorf("hotkey %q must contain at least two keys", value)
 	}
 	return keys, nil

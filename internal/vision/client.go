@@ -15,6 +15,19 @@ import (
 	"github.com/th1nk-er/ScreenLens/internal/transport"
 )
 
+const (
+	jsonContentType          = "application/json"
+	visionResponseBodyLimit  = 4 << 20
+	maxAPIErrorMessageLength = 1000
+	apiErrorMessageSuffix    = "..."
+	base64DataURLPrefix      = "data:"
+	base64DataURLSeparator   = ";base64,"
+	defaultMaxTokensField    = "max_tokens"
+	textPartSeparator        = "\n"
+	initialRequestCount      = 1
+	authHeaderCapacity       = 2
+)
+
 // Vision is deliberately protocol-oriented. A vendor that implements one of
 // the supported wire protocols only needs endpoint/model configuration; the
 // workflow does not know or care which vendor is behind the endpoint.
@@ -51,7 +64,7 @@ func New(cfg config.VisionConfig, imageMIME string) (Vision, error) {
 		cfg.APIKeyHeader = config.DefaultAPIKeyHeader(protocol)
 	}
 	if cfg.APIKeyPrefix == "" && protocol != config.ProtocolAnthropicMessages {
-		cfg.APIKeyPrefix = "Bearer"
+		cfg.APIKeyPrefix = config.DefaultAPIKeyPrefix
 	}
 	if cfg.MaxTokensField == "" {
 		cfg.MaxTokensField = config.DefaultMaxTokensField(protocol)
@@ -61,7 +74,7 @@ func New(cfg config.VisionConfig, imageMIME string) (Vision, error) {
 		return nil, err
 	}
 	if imageMIME == "" {
-		imageMIME = "image/jpeg"
+		imageMIME = config.MIMETypeJPEG
 	}
 	base := client{
 		httpClient:     httpClient,
@@ -95,7 +108,8 @@ func (c *client) request(ctx context.Context, payload any, extraHeaders map[stri
 		return nil, fmt.Errorf("encode vision request: %w", err)
 	}
 
-	for attempt := 0; attempt <= c.retryCount; attempt++ {
+	attemptCount := c.retryCount + initialRequestCount
+	for attempt := 0; attempt < attemptCount; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, fmt.Errorf("vision request: %w", err)
 		}
@@ -104,7 +118,7 @@ func (c *client) request(ctx context.Context, payload any, extraHeaders map[stri
 		if err != nil {
 			return nil, fmt.Errorf("create vision request: %w", err)
 		}
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", jsonContentType)
 		for key, value := range c.headers {
 			req.Header.Set(key, value)
 		}
@@ -119,7 +133,7 @@ func (c *client) request(ctx context.Context, payload any, extraHeaders map[stri
 			}
 			return nil, fmt.Errorf("vision request: %w", err)
 		}
-		responseBody, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+		responseBody, err := io.ReadAll(io.LimitReader(response.Body, visionResponseBodyLimit))
 		closeErr := response.Body.Close()
 		if err != nil {
 			if shouldRetry(ctx, err, attempt, c.retryCount) {
@@ -135,8 +149,8 @@ func (c *client) request(ctx context.Context, payload any, extraHeaders map[stri
 		}
 		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 			message := strings.TrimSpace(string(responseBody))
-			if len(message) > 1000 {
-				message = message[:1000] + "..."
+			if len(message) > maxAPIErrorMessageLength {
+				message = message[:maxAPIErrorMessageLength] + apiErrorMessageSuffix
 			}
 			requestErr := fmt.Errorf("vision API returned %s: %s", response.Status, message)
 			if shouldRetry(ctx, requestErr, attempt, c.retryCount) {
@@ -147,7 +161,7 @@ func (c *client) request(ctx context.Context, payload any, extraHeaders map[stri
 		return responseBody, nil
 	}
 
-	return nil, fmt.Errorf("vision request failed after %d attempts", c.retryCount+1)
+	return nil, fmt.Errorf("vision request failed after %d attempts", attemptCount)
 }
 
 func shouldRetry(ctx context.Context, err error, attempt, retryCount int) bool {
@@ -158,7 +172,7 @@ func shouldRetry(ctx context.Context, err error, attempt, retryCount int) bool {
 }
 
 func (c client) authHeaders() map[string]string {
-	headers := make(map[string]string, 2)
+	headers := make(map[string]string, authHeaderCapacity)
 	if c.apiKey == "" {
 		return headers
 	}
@@ -184,7 +198,7 @@ func hasHeader(headers map[string]string, name string) bool {
 }
 
 func (c client) imageData(image []byte) string {
-	return "data:" + c.imageMIME + ";base64," + base64.StdEncoding.EncodeToString(image)
+	return base64DataURLPrefix + c.imageMIME + base64DataURLSeparator + base64.StdEncoding.EncodeToString(image)
 }
 
 func (c client) tokenField(target map[string]any) {
@@ -193,7 +207,7 @@ func (c client) tokenField(target map[string]any) {
 	}
 	field := c.maxTokensField
 	if field == "" {
-		field = "max_tokens"
+		field = defaultMaxTokensField
 	}
 	target[field] = c.maxTokens
 }
@@ -223,7 +237,7 @@ func contentText(raw json.RawMessage) string {
 		for _, part := range parts {
 			if part.Text != "" {
 				if text.Len() > 0 {
-					text.WriteString("\n")
+					text.WriteString(textPartSeparator)
 				}
 				text.WriteString(part.Text)
 			}

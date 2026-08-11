@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/th1nk-er/ScreenLens/internal/config"
 	"github.com/th1nk-er/ScreenLens/internal/hotkey"
@@ -22,11 +23,20 @@ import (
 	"github.com/th1nk-er/ScreenLens/internal/workflow"
 )
 
+const (
+	defaultConfigPath = "config.yaml"
+	instanceName      = "Local\\ScreenLens"
+	buildModeConsole  = "console"
+	buildModeGUI      = "gui"
+	statusIdle        = "Idle"
+	statusCapturing   = "Capturing"
+)
+
 func main() {
-	configPath := flag.String("config", "config.yaml", "path to the YAML configuration file")
+	configPath := flag.String("config", defaultConfigPath, "path to the YAML configuration file")
 	flag.Parse()
 
-	logHandle, err := logging.Open("", buildMode == "console")
+	logHandle, err := logging.Open("", buildMode == buildModeConsole)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "initialize logging: %v\n", err)
 		os.Exit(1)
@@ -48,7 +58,7 @@ func main() {
 		}
 		if configuredPath != logHandle.Path {
 			previousLogHandle := logHandle
-			logHandle, err = logging.Open(cfg.App.LogFile, buildMode == "console")
+			logHandle, err = logging.Open(cfg.App.LogFile, buildMode == buildModeConsole)
 			if err != nil {
 				logger.Error("initialize configured logging", "error", err)
 				os.Exit(1)
@@ -60,7 +70,7 @@ func main() {
 	}
 	logger.Info("ScreenLens starting", "mode", buildMode, "log_file", logHandle.Path)
 
-	instanceLock, err := instance.Acquire("Local\\ScreenLens")
+	instanceLock, err := instance.Acquire(instanceName)
 	if errors.Is(err, instance.ErrAlreadyRunning) {
 		logger.Warn("another ScreenLens instance is already running")
 		return
@@ -117,7 +127,7 @@ func main() {
 		if hotkeyChanged {
 			if err := hotkeyManager.Start(next.Hotkey.Enabled, next.Hotkey.Capture, func() {
 				logger.Info("capture hotkey pressed")
-				if err := engine.CaptureFrom(ctx, "", "hotkey"); err != nil {
+				if err := engine.CaptureFrom(ctx, "", workflow.CaptureSourceHotkey); err != nil {
 					logger.Warn("queue hotkey capture", "error", err)
 				}
 			}); err != nil {
@@ -134,7 +144,7 @@ func main() {
 	telegramBot, err := telegram.New(cfg.Telegram, telegram.Handlers{
 		Context: ctx,
 		OnScreen: func(ctx context.Context, target string) error {
-			return engine.CaptureFrom(ctx, target, "telegram")
+			return engine.CaptureFrom(ctx, target, workflow.CaptureSourceTelegram)
 		},
 		OnReload: reload,
 		Status: func() string {
@@ -163,7 +173,7 @@ func main() {
 
 	if err := hotkeyManager.Start(cfg.Hotkey.Enabled, cfg.Hotkey.Capture, func() {
 		logger.Info("capture hotkey pressed")
-		if err := engine.CaptureFrom(ctx, "", "hotkey"); err != nil {
+		if err := engine.CaptureFrom(ctx, "", workflow.CaptureSourceHotkey); err != nil {
 			logger.Warn("queue hotkey capture", "error", err)
 		}
 	}); err != nil {
@@ -171,14 +181,14 @@ func main() {
 		cancel()
 	}
 
-	trayEnabled := buildMode == "gui" || cfg.Tray.Enabled
-	if buildMode == "gui" && !cfg.Tray.Enabled {
+	trayEnabled := buildMode == buildModeGUI || cfg.Tray.Enabled
+	if buildMode == buildModeGUI && !cfg.Tray.Enabled {
 		logger.Info("tray enabled by GUI build mode")
 	}
 	if trayEnabled {
 		go tray.Run(ctx, cfg.App.Name, tray.Actions{
 			Capture: func() {
-				if err := engine.CaptureFrom(ctx, "", "tray"); err != nil {
+				if err := engine.CaptureFrom(ctx, "", workflow.CaptureSourceTray); err != nil {
 					logger.Warn("queue tray capture", "error", err)
 				}
 			},
@@ -211,9 +221,9 @@ func buildComponents(cfg config.Config) (*screenshot.Capturer, vision.Vision, er
 }
 
 func formatStatus(status workflow.Status, cfg config.Config) string {
-	state := "Idle"
+	state := statusIdle
 	if status.Busy {
-		state = "Capturing"
+		state = statusCapturing
 	}
 	parts := []string{
 		"# ScreenLens status",
@@ -223,7 +233,7 @@ func formatStatus(status workflow.Status, cfg config.Config) string {
 		"- **Model:** `" + cfg.Vision.Model + "`",
 	}
 	if !status.LastFinished.IsZero() {
-		parts = append(parts, "- **Last duration:** `"+status.LastDuration.Round(1000000).String()+"`")
+		parts = append(parts, "- **Last duration:** `"+status.LastDuration.Round(time.Millisecond).String()+"`")
 	} else {
 		parts = append(parts, "- **Last duration:** _not available yet_")
 	}

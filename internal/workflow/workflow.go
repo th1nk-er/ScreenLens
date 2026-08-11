@@ -10,7 +10,22 @@ import (
 	"time"
 )
 
-const CaptureRequest = "capture.request"
+const (
+	CaptureRequest = "capture.request"
+
+	CaptureSourceRequest  = "request"
+	CaptureSourceHotkey   = "hotkey"
+	CaptureSourceTelegram = "telegram"
+	CaptureSourceTray     = "tray"
+)
+
+const (
+	defaultCaptureSource = "unknown"
+	eventQueueSize       = 8
+	noReplyMessageID     = 0
+	screenshotCaption    = "ScreenLens capture"
+	errorMessagePrefix   = "ScreenLens error: "
+)
 
 var ErrCaptureInProgress = errors.New("a capture is already queued or in progress")
 
@@ -68,7 +83,7 @@ func New(capture Capture, vision Vision, sender Sender, prompt string, sendImage
 		sender:    sender,
 		prompt:    prompt,
 		sendImage: sendImage,
-		events:    make(chan Event, 8),
+		events:    make(chan Event, eventQueueSize),
 	}
 }
 
@@ -87,7 +102,7 @@ func (e *Engine) Publish(ctx context.Context, event Event) error {
 }
 
 func (e *Engine) Capture(ctx context.Context, target string) error {
-	return e.CaptureFrom(ctx, target, "request")
+	return e.CaptureFrom(ctx, target, CaptureSourceRequest)
 }
 
 func (e *Engine) CaptureFrom(ctx context.Context, target, source string) error {
@@ -143,7 +158,7 @@ func (e *Engine) Status() Status {
 
 func (e *Engine) handleCapture(ctx context.Context, target, source string) {
 	if source == "" {
-		source = "unknown"
+		source = defaultCaptureSource
 	}
 	slog.Info("capture started", "source", source)
 	e.mu.Lock()
@@ -172,12 +187,12 @@ func (e *Engine) handleCapture(ctx context.Context, target, source string) {
 	}()
 
 	if capture == nil || vision == nil || e.sender == nil {
-		e.fail(ctx, target, fmt.Errorf("workflow is not fully initialized"), 0)
+		e.fail(ctx, target, fmt.Errorf("workflow is not fully initialized"), noReplyMessageID)
 		return
 	}
 	image, err := capture.Screenshot()
 	if err != nil {
-		e.fail(ctx, target, fmt.Errorf("capture screenshot: %w", err), 0)
+		e.fail(ctx, target, fmt.Errorf("capture screenshot: %w", err), noReplyMessageID)
 		slog.Error("screenshot failed", "source", source, "error", err)
 		return
 	}
@@ -187,7 +202,7 @@ func (e *Engine) handleCapture(ctx context.Context, target, source string) {
 	if sendImage {
 		// Deliver the screenshot as soon as capture succeeds. The LLM request
 		// happens afterwards, so Telegram receives visual feedback immediately.
-		screenshotMessageID, err = e.sender.SendPhoto(ctx, target, image, "ScreenLens capture")
+		screenshotMessageID, err = e.sender.SendPhoto(ctx, target, image, screenshotCaption)
 		if err != nil {
 			screenshotWarning = fmt.Errorf("send screenshot: %w", err)
 			e.setLastWarning(screenshotWarning)
@@ -221,7 +236,7 @@ func (e *Engine) handleCapture(ctx context.Context, target, source string) {
 }
 
 func (e *Engine) sendResult(ctx context.Context, target, text string, replyTo int) error {
-	if replyTo > 0 {
+	if replyTo > noReplyMessageID {
 		return e.sender.SendReply(ctx, target, text, replyTo)
 	}
 	return e.sender.SendText(ctx, target, text)
@@ -229,7 +244,7 @@ func (e *Engine) sendResult(ctx context.Context, target, text string, replyTo in
 
 func (e *Engine) fail(ctx context.Context, target string, err error, replyTo int) {
 	e.setLastError(err)
-	_ = e.sendResult(ctx, target, "ScreenLens error: "+err.Error(), replyTo)
+	_ = e.sendResult(ctx, target, errorMessagePrefix+err.Error(), replyTo)
 }
 
 func (e *Engine) senderText(ctx context.Context, target, text string) error {

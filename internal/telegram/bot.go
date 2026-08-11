@@ -3,6 +3,7 @@ package telegram
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -15,6 +16,16 @@ import (
 	"github.com/th1nk-er/ScreenLens/internal/config"
 	"github.com/th1nk-er/ScreenLens/internal/transport"
 )
+
+const (
+	commandScreen = "screen"
+	commandReload = "reload"
+	commandStatus = "status"
+	commandHelp   = "help"
+	statusRunning = "running"
+)
+
+var errTelegramTargetEmpty = errors.New("Telegram target is empty")
 
 type Sender interface {
 	SendText(ctx context.Context, target, text string) error
@@ -77,10 +88,10 @@ func New(cfg config.TelegramConfig, handlers Handlers) (*Bot, error) {
 
 func registerCommands(bot *tele.Bot) error {
 	return bot.SetCommands([]tele.Command{
-		{Text: "screen", Description: "Capture and analyze the current screen"},
-		{Text: "reload", Description: "Reload capture and vision configuration"},
-		{Text: "status", Description: "Show ScreenLens runtime status"},
-		{Text: "help", Description: "Show available commands"},
+		{Text: commandScreen, Description: "Capture and analyze the current screen"},
+		{Text: commandReload, Description: "Reload capture and vision configuration"},
+		{Text: commandStatus, Description: "Show ScreenLens runtime status"},
+		{Text: commandHelp, Description: "Show available commands"},
 	})
 }
 
@@ -108,7 +119,7 @@ func (b *Bot) sendRich(ctx context.Context, target, text string, replyTo int) er
 	}
 	target = b.defaultTarget(target)
 	if target == "" {
-		return fmt.Errorf("Telegram target is empty")
+		return errTelegramTargetEmpty
 	}
 	// RichMessage carries extended Markdown in its own field, so it avoids
 	// Telegram's legacy parse_mode escaping and the 4096-character text split.
@@ -130,7 +141,7 @@ func (b *Bot) SendPhoto(ctx context.Context, target string, image []byte, captio
 	}
 	target = b.defaultTarget(target)
 	if target == "" {
-		return 0, fmt.Errorf("Telegram target is empty")
+		return 0, errTelegramTargetEmpty
 	}
 	photo := &tele.Photo{File: tele.FromReader(bytes.NewReader(image)), Caption: caption}
 	message, err := b.bot.Send(recipient(target), photo, &tele.SendOptions{})
@@ -144,7 +155,7 @@ func (b *Bot) SendPhoto(ctx context.Context, target string, image []byte, captio
 }
 
 func (b *Bot) registerHandlers() {
-	b.bot.Handle("/screen", func(c tele.Context) error {
+	b.bot.Handle("/"+commandScreen, func(c tele.Context) error {
 		if !b.authorized(c) {
 			return nil
 		}
@@ -161,7 +172,7 @@ func (b *Bot) registerHandlers() {
 		return nil
 	})
 
-	b.bot.Handle("/reload", func(c tele.Context) error {
+	b.bot.Handle("/"+commandReload, func(c tele.Context) error {
 		if !b.authorized(c) {
 			return nil
 		}
@@ -174,18 +185,18 @@ func (b *Bot) registerHandlers() {
 		return sendRich(c, "Configuration reloaded.")
 	})
 
-	b.bot.Handle("/status", func(c tele.Context) error {
+	b.bot.Handle("/"+commandStatus, func(c tele.Context) error {
 		if !b.authorized(c) {
 			return nil
 		}
-		status := "running"
+		status := statusRunning
 		if b.handlers.Status != nil {
 			status = b.handlers.Status()
 		}
 		return sendRich(c, status)
 	})
 
-	b.bot.Handle("/help", func(c tele.Context) error {
+	b.bot.Handle("/"+commandHelp, func(c tele.Context) error {
 		if !b.authorized(c) {
 			return nil
 		}

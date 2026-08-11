@@ -13,6 +13,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+const (
+	instanceLockFileMode = 0600
+	defaultInstanceName  = "screenlens"
+)
+
 type Lock struct {
 	file *os.File
 }
@@ -22,7 +27,7 @@ func Acquire(name string) (*Lock, error) {
 	if err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, instanceLockFileMode)
 	if err != nil {
 		return nil, fmt.Errorf("open instance lock %q: %w", lockPath, err)
 	}
@@ -62,7 +67,7 @@ func lockPath(name string) (string, error) {
 	}, strings.TrimSpace(name))
 	baseName = strings.Trim(baseName, "_")
 	if baseName == "" {
-		baseName = "screenlens"
+		baseName = defaultInstanceName
 	}
 	return filepath.Join(filepath.Dir(executable), "."+baseName+".lock"), nil
 }

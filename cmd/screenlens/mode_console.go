@@ -2,4 +2,4 @@
 
 package main
 
-const buildMode = "console"
+const buildMode = buildModeConsole

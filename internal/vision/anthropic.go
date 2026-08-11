@@ -8,7 +8,11 @@ import (
 	"strings"
 )
 
-const anthropicMaxBase64ImageBytes = 10_000_000
+const (
+	anthropicMaxBase64ImageBytes = 10_000_000
+	anthropicVersionHeader       = "anthropic-version"
+	anthropicAPIVersion          = "2023-06-01"
+)
 
 type anthropicClient struct {
 	client
@@ -39,8 +43,8 @@ func (c *anthropicClient) Analyze(ctx context.Context, image []byte, prompt stri
 	}
 	c.tokenField(payload)
 	headers := c.authHeaders()
-	if !hasHeader(c.headers, "anthropic-version") {
-		headers["anthropic-version"] = "2023-06-01"
+	if !hasHeader(c.headers, anthropicVersionHeader) {
+		headers[anthropicVersionHeader] = anthropicAPIVersion
 	}
 	responseBody, err := c.request(ctx, payload, headers)
 	if err != nil {

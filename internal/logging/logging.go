@@ -10,7 +10,13 @@ import (
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-const defaultFileName = "screenlens.log"
+const (
+	defaultFileName  = "screenlens.log"
+	logDirectoryMode = 0755
+	logMaxSizeMB     = 10
+	logMaxBackups    = 5
+	logMaxAgeDays    = 30
+)
 
 type Handle struct {
 	Logger *slog.Logger
@@ -23,14 +29,14 @@ func Open(configuredPath string, mirrorConsole bool) (*Handle, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), logDirectoryMode); err != nil {
 		return nil, fmt.Errorf("create log directory: %w", err)
 	}
 	writer := &lumberjack.Logger{
 		Filename:   path,
-		MaxSize:    10,
-		MaxBackups: 5,
-		MaxAge:     30,
+		MaxSize:    logMaxSizeMB,
+		MaxBackups: logMaxBackups,
+		MaxAge:     logMaxAgeDays,
 		Compress:   true,
 	}
 	var output io.Writer = writer

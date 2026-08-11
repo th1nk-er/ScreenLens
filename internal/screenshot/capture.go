@@ -14,6 +14,15 @@ import (
 	xdraw "golang.org/x/image/draw"
 )
 
+const (
+	defaultDisplayIndex    = 0
+	minimumImageSize       = 1
+	minimumJPEGQuality     = 25
+	qualityReduction       = 10
+	resizeScaleNumerator   = 4
+	resizeScaleDenominator = 5
+)
+
 type Capture interface {
 	Screenshot() ([]byte, error)
 }
@@ -28,9 +37,9 @@ type Capturer struct {
 }
 
 func New(cfg config.CaptureConfig) (*Capturer, error) {
-	index := 0
+	index := defaultDisplayIndex
 	monitor := strings.ToLower(strings.TrimSpace(cfg.Monitor))
-	if monitor != "" && monitor != "primary" {
+	if monitor != "" && monitor != config.MonitorPrimary {
 		parsed, err := strconv.Atoi(monitor)
 		if err != nil || parsed < 0 {
 			return nil, fmt.Errorf("invalid display index %q", cfg.Monitor)
@@ -38,27 +47,27 @@ func New(cfg config.CaptureConfig) (*Capturer, error) {
 		index = parsed
 	}
 	format := strings.ToLower(strings.TrimSpace(cfg.Format))
-	if format == "jpg" {
-		format = "jpeg"
+	if format == config.FormatJPG {
+		format = config.FormatJPEG
 	}
-	if format != "jpeg" && format != "png" {
+	if format != config.FormatJPEG && format != config.FormatPNG {
 		return nil, fmt.Errorf("unsupported screenshot format %q", cfg.Format)
 	}
 	quality := cfg.Quality
 	if quality == 0 {
-		quality = 85
+		quality = config.DefaultCaptureQuality
 	}
 	maxWidth := cfg.MaxWidth
 	if maxWidth == 0 {
-		maxWidth = 2560
+		maxWidth = config.DefaultCaptureMaxWidth
 	}
 	maxHeight := cfg.MaxHeight
 	if maxHeight == 0 {
-		maxHeight = 1440
+		maxHeight = config.DefaultCaptureMaxHeight
 	}
 	maxBytes := cfg.MaxBytes
 	if maxBytes == 0 {
-		maxBytes = 7 * 1024 * 1024
+		maxBytes = config.DefaultCaptureMaxBytes
 	}
 	if maxWidth < 1 || maxHeight < 1 || maxBytes < 1 {
 		return nil, fmt.Errorf("screenshot size limits must be positive")
@@ -89,13 +98,14 @@ func (c *Capturer) Screenshot() ([]byte, error) {
 			return encoded, nil
 		}
 
-		if c.format == "jpeg" && quality > 25 {
-			quality -= 10
+		if c.format == config.FormatJPEG && quality > minimumJPEGQuality {
+			quality -= qualityReduction
 			continue
 		}
 		bounds := source.Bounds()
 		width, height := bounds.Dx(), bounds.Dy()
-		nextWidth, nextHeight := max(1, width*4/5), max(1, height*4/5)
+		nextWidth := max(minimumImageSize, width*resizeScaleNumerator/resizeScaleDenominator)
+		nextHeight := max(minimumImageSize, height*resizeScaleNumerator/resizeScaleDenominator)
 		if nextWidth == width && nextHeight == height {
 			return nil, fmt.Errorf("encoded screenshot exceeds max_bytes (%d bytes)", c.maxBytes)
 		}
@@ -108,7 +118,7 @@ func (c *Capturer) encode(source image.Image, quality int) ([]byte, error) {
 	var encoded bytes.Buffer
 	var err error
 	switch c.format {
-	case "png":
+	case config.FormatPNG:
 		err = png.Encode(&encoded, source)
 	default:
 		err = jpeg.Encode(&encoded, source, &jpeg.Options{Quality: quality})
@@ -132,16 +142,16 @@ func resizeToFit(source image.Image, maxWidth, maxHeight int) image.Image {
 	if heightScale := float64(maxHeight) / float64(height); heightScale < scale {
 		scale = heightScale
 	}
-	newWidth := max(1, int(float64(width)*scale))
-	newHeight := max(1, int(float64(height)*scale))
+	newWidth := max(minimumImageSize, int(float64(width)*scale))
+	newHeight := max(minimumImageSize, int(float64(height)*scale))
 	destination := image.NewRGBA(image.Rect(0, 0, newWidth, newHeight))
 	xdraw.CatmullRom.Scale(destination, destination.Bounds(), source, bounds, xdraw.Over, nil)
 	return destination
 }
 
 func (c *Capturer) MIMEType() string {
-	if c.format == "png" {
-		return "image/png"
+	if c.format == config.FormatPNG {
+		return config.MIMETypePNG
 	}
-	return "image/jpeg"
+	return config.MIMETypeJPEG
 }
