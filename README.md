@@ -169,6 +169,17 @@ On headless Linux machines, use `make test` or `make race`; when `DISPLAY` is no
 
 The project uses a protocol adapter boundary so additional compatible providers can be added without changing the workflow layer.
 
+## Releases
+
+Push a semantic version tag to build native packages and publish a GitHub Release:
+
+```sh
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+The release workflow publishes Linux amd64, macOS amd64, macOS arm64, and Windows amd64 archives. Each archive contains GUI and console binaries, the example configuration, and documentation. GitHub generates the release notes automatically, and a `SHA256SUMS` file is attached to the release.
+
 ## License
 
 ScreenLens is licensed under the [Apache License 2.0](LICENSE). The project attribution notice is in [NOTICE](NOTICE).
