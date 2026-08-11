@@ -132,6 +132,7 @@ Important settings include:
 - `capture.format`: `jpeg` or `png`.
 - `capture.max_width`, `capture.max_height`, and `capture.max_bytes`: screenshot limits.
 - `vision.protocol`, `vision.endpoint`, and `vision.model`: the model protocol and target.
+- `vision.retry_count`: the number of additional attempts after an LLM API error; defaults to `3`.
 - `vision.headers`: additional provider-specific HTTP headers.
 - `vision.proxy` and `telegram.proxy`: independent network proxies.
 - `telegram.allowed_user_ids`: required when the configured Telegram chat is a group.

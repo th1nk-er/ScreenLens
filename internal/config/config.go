@@ -62,6 +62,7 @@ type VisionConfig struct {
 	Headers        map[string]string `yaml:"headers"`
 	Prompt         string            `yaml:"prompt"`
 	Timeout        string            `yaml:"timeout"`
+	RetryCount     int               `yaml:"retry_count"`
 	MaxTokens      int               `yaml:"max_tokens"`
 	MaxTokensField string            `yaml:"max_tokens_field"`
 	Proxy          ProxyConfig       `yaml:"proxy"`
@@ -103,12 +104,13 @@ func Defaults() Config {
 			MaxBytes:  7 * 1024 * 1024,
 		},
 		Vision: VisionConfig{
-			Protocol:  ProtocolOpenAIChat,
-			Endpoint:  "https://api.openai.com/v1/chat/completions",
-			Model:     "gpt-4.1-mini",
-			Prompt:    defaultPrompt,
-			Timeout:   "2m",
-			MaxTokens: 2048,
+			Protocol:   ProtocolOpenAIChat,
+			Endpoint:   "https://api.openai.com/v1/chat/completions",
+			Model:      "gpt-4.1-mini",
+			Prompt:     defaultPrompt,
+			Timeout:    "2m",
+			RetryCount: 3,
+			MaxTokens:  2048,
 		},
 		Telegram: TelegramConfig{
 			ParseMode:   "MarkdownV2",
@@ -216,6 +218,9 @@ func (c *Config) NormalizeAndValidate() error {
 	}
 	if c.Vision.MaxTokens < 1 {
 		return errors.New("vision.max_tokens must be positive")
+	}
+	if c.Vision.RetryCount < 0 {
+		return errors.New("vision.retry_count must not be negative")
 	}
 	if c.Vision.APIKeyHeader == "" {
 		c.Vision.APIKeyHeader = DefaultAPIKeyHeader(c.Vision.Protocol)

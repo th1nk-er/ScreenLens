@@ -4,6 +4,9 @@ import "testing"
 
 func TestNormalizeProtocolAndDefaults(t *testing.T) {
 	cfg := Defaults()
+	if cfg.Vision.RetryCount != 3 {
+		t.Fatalf("retry_count = %d, want 3", cfg.Vision.RetryCount)
+	}
 	cfg.Vision.Protocol = "responses"
 	cfg.Vision.Model = "vision-model"
 	cfg.Vision.APIKey = "key"
@@ -47,5 +50,17 @@ func TestNormalizeAndValidateRejectsInvalidTimeoutAndMonitor(t *testing.T) {
 	badMonitor.Capture.Monitor = "2screens"
 	if err := badMonitor.NormalizeAndValidate(); err == nil {
 		t.Fatal("invalid monitor was accepted")
+	}
+}
+
+func TestNormalizeAndValidateRejectsNegativeRetryCount(t *testing.T) {
+	cfg := Defaults()
+	cfg.Vision.Model = "model"
+	cfg.Vision.RetryCount = -1
+	cfg.Telegram.Token = "token"
+	cfg.Telegram.ChatID = "123"
+
+	if err := cfg.NormalizeAndValidate(); err == nil {
+		t.Fatal("negative vision retry count was accepted")
 	}
 }

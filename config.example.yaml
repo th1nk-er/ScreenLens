@@ -38,6 +38,8 @@ vision:
   # proxy:
   #   type: socks5
   #   address: 127.0.0.1:1080
+  # Number of additional attempts after an LLM API error.
+  retry_count: 3
   # OpenAI Chat Completions defaults to max_completion_tokens. Legacy
   # OpenAI-compatible providers may override this with max_tokens.
   # max_tokens_field: max_tokens

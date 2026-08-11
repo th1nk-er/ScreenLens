@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,11 +31,15 @@ type client struct {
 	apiKeyPrefix   string
 	headers        map[string]string
 	imageMIME      string
+	retryCount     int
 	maxTokens      int
 	maxTokensField string
 }
 
 func New(cfg config.VisionConfig, imageMIME string) (Vision, error) {
+	if cfg.RetryCount < 0 {
+		return nil, fmt.Errorf("vision.retry_count must not be negative")
+	}
 	protocol := config.NormalizeProtocol(cfg.Protocol, cfg.Provider)
 	if protocol == "" {
 		protocol = config.ProtocolOpenAIChat
@@ -67,6 +72,7 @@ func New(cfg config.VisionConfig, imageMIME string) (Vision, error) {
 		apiKeyPrefix:   cfg.APIKeyPrefix,
 		headers:        cloneHeaders(cfg.Headers),
 		imageMIME:      imageMIME,
+		retryCount:     cfg.RetryCount,
 		maxTokens:      cfg.MaxTokens,
 		maxTokensField: cfg.MaxTokensField,
 	}
@@ -88,35 +94,67 @@ func (c *client) request(ctx context.Context, payload any, extraHeaders map[stri
 	if err != nil {
 		return nil, fmt.Errorf("encode vision request: %w", err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("create vision request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	for key, value := range c.headers {
-		req.Header.Set(key, value)
-	}
-	for key, value := range extraHeaders {
-		req.Header.Set(key, value)
+
+	for attempt := 0; attempt <= c.retryCount; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("vision request: %w", err)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("create vision request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		for key, value := range c.headers {
+			req.Header.Set(key, value)
+		}
+		for key, value := range extraHeaders {
+			req.Header.Set(key, value)
+		}
+
+		response, err := c.httpClient.Do(req)
+		if err != nil {
+			if shouldRetry(ctx, err, attempt, c.retryCount) {
+				continue
+			}
+			return nil, fmt.Errorf("vision request: %w", err)
+		}
+		responseBody, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+		closeErr := response.Body.Close()
+		if err != nil {
+			if shouldRetry(ctx, err, attempt, c.retryCount) {
+				continue
+			}
+			return nil, fmt.Errorf("read vision response: %w", err)
+		}
+		if closeErr != nil {
+			if shouldRetry(ctx, closeErr, attempt, c.retryCount) {
+				continue
+			}
+			return nil, fmt.Errorf("close vision response: %w", closeErr)
+		}
+		if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+			message := strings.TrimSpace(string(responseBody))
+			if len(message) > 1000 {
+				message = message[:1000] + "..."
+			}
+			requestErr := fmt.Errorf("vision API returned %s: %s", response.Status, message)
+			if shouldRetry(ctx, requestErr, attempt, c.retryCount) {
+				continue
+			}
+			return nil, requestErr
+		}
+		return responseBody, nil
 	}
 
-	response, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("vision request: %w", err)
+	return nil, fmt.Errorf("vision request failed after %d attempts", c.retryCount+1)
+}
+
+func shouldRetry(ctx context.Context, err error, attempt, retryCount int) bool {
+	if attempt >= retryCount || ctx.Err() != nil {
+		return false
 	}
-	defer response.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
-	if err != nil {
-		return nil, fmt.Errorf("read vision response: %w", err)
-	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		message := strings.TrimSpace(string(responseBody))
-		if len(message) > 1000 {
-			message = message[:1000] + "..."
-		}
-		return nil, fmt.Errorf("vision API returned %s: %s", response.Status, message)
-	}
-	return responseBody, nil
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
 
 func (c client) authHeaders() map[string]string {
