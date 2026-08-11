@@ -198,6 +198,33 @@ func TestVisionStopsAfterRetryCount(t *testing.T) {
 	}
 }
 
+func TestVisionDoesNotRetryPermanentClientErrors(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Error(w, `{"error":"invalid request"}`, http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	cfg := config.VisionConfig{
+		Protocol:   config.ProtocolOpenAIChat,
+		Endpoint:   server.URL,
+		Model:      "vision-model",
+		RetryCount: 3,
+		Timeout:    "5s",
+	}
+	client, err := New(cfg, "image/jpeg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Analyze(context.Background(), []byte("screen"), "describe"); err == nil {
+		t.Fatal("Analyze() error = nil, want API error")
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1 for a permanent 400 error", requests)
+	}
+}
+
 func TestAnthropicRejectsOversizedBase64Image(t *testing.T) {
 	client := &anthropicClient{}
 	_, err := client.Analyze(context.Background(), make([]byte, 7_500_001), "describe")

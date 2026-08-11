@@ -19,32 +19,12 @@ capture:
   # 7 MiB leaves room for Base64 expansion under Anthropic's 10 MB limit.
   max_bytes: 7340032
 
-vision:
-  # The protocol is independent from the vendor. Use a custom endpoint and
-  # model for any service implementing one of these APIs.
-  # Supported values: openai-chat-completions, openai-responses,
-  # anthropic-messages.
-  protocol: openai-chat-completions
-  endpoint: https://api.openai.com/v1/chat/completions
-  model: gpt-5.6-sol
-  api_key: ${OPENAI_API_KEY}
-  # api_key_header: Authorization
-  # api_key_prefix: Bearer
-  # headers:
-  #   X-Custom-Header: value
-  timeout: 2m
-  max_tokens: 2048
-  # Optional proxy for OpenAI/Anthropic/compatible LLM requests.
-  # proxy:
-  #   type: socks5
-  #   address: 127.0.0.1:1080
-  # Number of additional attempts after an LLM API error.
-  retry_count: 3
-  # OpenAI Chat Completions defaults to max_completion_tokens. Legacy
-  # OpenAI-compatible providers may override this with max_tokens.
-  # max_tokens_field: max_tokens
+analysis:
+  # codex -> claude -> opencode; the first installed CLI wins.
+  mode: local-agent
+  profile: auto
   prompt: |
-    Analyze this screenshot and answer in concise Markdown.
+    Analyze the screenshot and answer in concise Markdown.
 
     Include:
     - Current application or context
@@ -52,6 +32,64 @@ vision:
     - Potential problems or recommended next actions
 
     If something is uncertain, say so explicitly.
+  timeout: 1m
+  max_output_bytes: 2097152
+  session: ephemeral
+
+  # All analysis backends are maintained in this one profile registry.
+  profiles:
+    codex:
+      type: local-agent
+      local_agent:
+        provider: codex
+        retry_count: 1
+        # command: codex
+        # {prompt}, {image_path}, {workdir}, and {session_id} are supported.
+        # args: [exec, --json, --sandbox, read-only, --skip-git-repo-check, --ignore-user-config, --image, "{image_path}", "{prompt}"]
+
+    claude:
+      type: local-agent
+      local_agent:
+        provider: claude
+        # Bounds Claude Code output for Anthropic-compatible gateways.
+        max_output_tokens: 8192
+        retry_count: 2
+
+    opencode:
+      type: local-agent
+      local_agent:
+        provider: opencode
+        retry_count: 1
+        # If overriding args, keep {prompt} before --file because --file is an array option.
+        # args: [--pure, run, --format, json, "{prompt}", --file, "{image_path}"]
+
+    # Hosted Vision API is an alternative. Select it with:
+    # analysis:
+    #   mode: vision
+    #   profile: vision
+    vision:
+      type: vision-api
+      vision:
+        # Supported values: openai-chat-completions, openai-responses,
+        # anthropic-messages.
+        protocol: openai-chat-completions
+        endpoint: https://api.openai.com/v1/chat/completions
+        model: your-vision-model
+        api_key: ${OPENAI_API_KEY}
+        # api_key_header: Authorization
+        # api_key_prefix: Bearer
+        # headers:
+        #   X-Custom-Header: value
+        timeout: 2m
+        max_tokens: 2048
+        # Optional proxy for OpenAI/Anthropic/compatible LLM requests.
+        # proxy:
+        #   type: socks5
+        #   address: 127.0.0.1:1080
+        retry_count: 3
+        # OpenAI Chat Completions defaults to max_completion_tokens. Legacy
+        # OpenAI-compatible providers may override this with max_tokens.
+        # max_tokens_field: max_tokens
 
 telegram:
   token: ${TELEGRAM_BOT_TOKEN}

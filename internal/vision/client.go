@@ -103,6 +103,9 @@ func New(cfg config.VisionConfig, imageMIME string) (Vision, error) {
 }
 
 func (c *client) request(ctx context.Context, payload any, extraHeaders map[string]string) ([]byte, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("encode vision request: %w", err)
@@ -153,7 +156,7 @@ func (c *client) request(ctx context.Context, payload any, extraHeaders map[stri
 				message = message[:maxAPIErrorMessageLength] + apiErrorMessageSuffix
 			}
 			requestErr := fmt.Errorf("vision API returned %s: %s", response.Status, message)
-			if shouldRetry(ctx, requestErr, attempt, c.retryCount) {
+			if shouldRetryStatus(ctx, response.StatusCode, attempt, c.retryCount) {
 				continue
 			}
 			return nil, requestErr
@@ -169,6 +172,18 @@ func shouldRetry(ctx context.Context, err error, attempt, retryCount int) bool {
 		return false
 	}
 	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
+}
+
+func shouldRetryStatus(ctx context.Context, statusCode, attempt, retryCount int) bool {
+	if !shouldRetry(ctx, nil, attempt, retryCount) {
+		return false
+	}
+	// Retry transient gateway failures and rate limiting, but do not repeat
+	// malformed, unauthorized, or otherwise permanent client requests.
+	return statusCode == http.StatusRequestTimeout ||
+		statusCode == http.StatusConflict ||
+		statusCode == http.StatusTooManyRequests ||
+		statusCode >= http.StatusInternalServerError
 }
 
 func (c client) authHeaders() map[string]string {

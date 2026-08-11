@@ -8,10 +8,14 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/th1nk-er/ScreenLens/internal/agent"
+	"github.com/th1nk-er/ScreenLens/internal/analyzer"
 	"github.com/th1nk-er/ScreenLens/internal/config"
 	"github.com/th1nk-er/ScreenLens/internal/hotkey"
 	"github.com/th1nk-er/ScreenLens/internal/instance"
@@ -84,7 +88,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	capture, visionClient, err := buildComponents(cfg)
+	capture, backend, backendName, err := buildComponents(cfg)
 	if err != nil {
 		logger.Error("initialize components", "error", err)
 		os.Exit(1)
@@ -98,32 +102,50 @@ func main() {
 
 	var engine *workflow.Engine
 	var currentConfig = cfg
-	var currentConfigMu = make(chan struct{}, 1)
-	currentConfigMu <- struct{}{}
+	var currentConfigMu sync.RWMutex
+	var reloadMu sync.Mutex
+	resolveProfile := func(profile string) (analyzer.Analyzer, string, error) {
+		currentConfigMu.RLock()
+		snapshot := currentConfig
+		currentConfigMu.RUnlock()
+		profileName := strings.ToLower(strings.TrimSpace(profile))
+		if profileName == "vision" || (snapshot.Analysis.Profiles[profileName].Type == config.AnalysisProfileTypeVisionAPI) {
+			snapshot.Analysis.Profile = profileName
+			resolved, err := buildVisionAnalyzer(snapshot, capture.MIMEType())
+			return resolved, profileName, err
+		}
+		snapshot.Analysis.Mode = config.AnalysisModeLocalAgent
+		snapshot.Analysis.Profile = profileName
+		resolved, name, err := buildLocalAnalyzer(snapshot)
+		return resolved, name, err
+	}
 	hotkeyManager := hotkey.NewManager(ctx, func(err error) {
 		logger.Error("hotkey listener stopped", "error", err)
 		cancel()
 	})
 	reload := func(context.Context) error {
+		reloadMu.Lock()
+		defer reloadMu.Unlock()
 		logger.Info("configuration reload started", "path", *configPath)
 		next, err := config.Load(*configPath)
 		if err != nil {
 			logger.Error("configuration reload failed", "stage", "load", "error", err)
 			return err
 		}
-		<-currentConfigMu
-		defer func() { currentConfigMu <- struct{}{} }()
-		if telegramRestartRequired(currentConfig.Telegram, next.Telegram) {
+		currentConfigMu.RLock()
+		previous := currentConfig
+		currentConfigMu.RUnlock()
+		if telegramRestartRequired(previous.Telegram, next.Telegram) {
 			err := fmt.Errorf("Telegram connection or authorization settings changed; restart is required")
 			logger.Error("configuration reload failed", "stage", "validate", "error", err)
 			return err
 		}
-		nextCapture, nextVision, err := buildComponents(next)
+		nextCapture, nextBackend, nextBackendName, err := buildComponents(next)
 		if err != nil {
 			logger.Error("configuration reload failed", "stage", "initialize", "error", err)
 			return err
 		}
-		hotkeyChanged := next.Hotkey.Enabled != currentConfig.Hotkey.Enabled || next.Hotkey.Capture != currentConfig.Hotkey.Capture
+		hotkeyChanged := next.Hotkey.Enabled != previous.Hotkey.Enabled || next.Hotkey.Capture != previous.Hotkey.Capture
 		if hotkeyChanged {
 			if err := hotkeyManager.Start(next.Hotkey.Enabled, next.Hotkey.Capture, func() {
 				logger.Info("capture hotkey pressed")
@@ -135,9 +157,11 @@ func main() {
 				return err
 			}
 		}
-		engine.Replace(nextCapture, nextVision, next.Vision.Prompt, next.Telegram.SendImage)
+		engine.ReplaceAnalyzer(nextCapture, nextBackend, next.Analysis.Prompt, next.Telegram.SendImage, nextBackendName, resolveProfile)
+		currentConfigMu.Lock()
 		currentConfig = next
-		logger.Info("configuration reload completed", "protocol", next.Vision.Protocol, "model", next.Vision.Model)
+		currentConfigMu.Unlock()
+		logger.Info("configuration reload completed", "analysis_mode", next.Analysis.Mode, "backend", nextBackendName)
 		return nil
 	}
 
@@ -146,11 +170,22 @@ func main() {
 		OnScreen: func(ctx context.Context, target string) error {
 			return engine.CaptureFrom(ctx, target, workflow.CaptureSourceTelegram)
 		},
+		OnScreenProfile: func(ctx context.Context, target, profile string) error {
+			return engine.CaptureFromProfile(ctx, target, workflow.CaptureSourceTelegram, profile)
+		},
 		OnReload: reload,
+		OnCancel: func(context.Context) bool { return engine.Cancel() },
+		Agents: func() string {
+			currentConfigMu.RLock()
+			snapshot := currentConfig
+			currentConfigMu.RUnlock()
+			return formatAgents(snapshot)
+		},
 		Status: func() string {
-			<-currentConfigMu
-			defer func() { currentConfigMu <- struct{}{} }()
-			return formatStatus(engine.Status(), currentConfig)
+			currentConfigMu.RLock()
+			snapshot := currentConfig
+			currentConfigMu.RUnlock()
+			return formatStatus(engine.Status(), snapshot)
 		},
 	})
 	if err != nil {
@@ -158,7 +193,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	engine = workflow.New(capture, visionClient, telegramBot, cfg.Vision.Prompt, cfg.Telegram.SendImage)
+	engine = workflow.NewAnalyzer(capture, backend, telegramBot, cfg.Analysis.Prompt, cfg.Telegram.SendImage, backendName, resolveProfile)
 	go func() {
 		if err := engine.Run(ctx); err != nil {
 			logger.Error("workflow stopped", "error", err)
@@ -208,16 +243,47 @@ func main() {
 	logger.Info("ScreenLens stopped")
 }
 
-func buildComponents(cfg config.Config) (*screenshot.Capturer, vision.Vision, error) {
+func buildComponents(cfg config.Config) (*screenshot.Capturer, analyzer.Analyzer, string, error) {
 	capture, err := screenshot.New(cfg.Capture)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create screenshot capturer: %w", err)
+		return nil, nil, "", fmt.Errorf("create screenshot capturer: %w", err)
 	}
-	visionClient, err := vision.New(cfg.Vision, capture.MIMEType())
+	backend, backendName, err := buildAnalyzer(cfg, capture.MIMEType())
 	if err != nil {
-		return nil, nil, fmt.Errorf("create vision client: %w", err)
+		return nil, nil, "", err
 	}
-	return capture, visionClient, nil
+	return capture, backend, backendName, nil
+}
+
+func buildAnalyzer(cfg config.Config, imageMIME string) (analyzer.Analyzer, string, error) {
+	if cfg.Analysis.Mode == config.AnalysisModeLocalAgent {
+		return buildLocalAnalyzer(cfg)
+	}
+	backend, err := buildVisionAnalyzer(cfg, imageMIME)
+	if err != nil {
+		return nil, "", err
+	}
+	return backend, "vision", nil
+}
+
+func buildVisionAnalyzer(cfg config.Config, imageMIME string) (analyzer.Analyzer, error) {
+	visionConfig, err := cfg.ActiveVisionConfig()
+	if err != nil {
+		return nil, fmt.Errorf("resolve vision profile: %w", err)
+	}
+	visionClient, err := vision.New(visionConfig, imageMIME)
+	if err != nil {
+		return nil, fmt.Errorf("create vision client: %w", err)
+	}
+	return analyzer.NewVisionAdapter(visionClient, imageMIME), nil
+}
+
+func buildLocalAnalyzer(cfg config.Config) (analyzer.Analyzer, string, error) {
+	backend, info, err := agent.Build(cfg.Analysis, cfg.LocalAgentProfiles())
+	if err != nil {
+		return nil, "", fmt.Errorf("create local agent: %w", err)
+	}
+	return backend, info.Provider, nil
 }
 
 func formatStatus(status workflow.Status, cfg config.Config) string {
@@ -229,8 +295,23 @@ func formatStatus(status workflow.Status, cfg config.Config) string {
 		"# ScreenLens status",
 		"",
 		"- **State:** `" + state + "`",
-		"- **Vision protocol:** `" + config.NormalizeProtocol(cfg.Vision.Protocol, cfg.Vision.Provider) + "`",
-		"- **Model:** `" + cfg.Vision.Model + "`",
+	}
+	if cfg.Analysis.Mode == config.AnalysisModeLocalAgent {
+		profile := status.Profile
+		if profile == "" {
+			profile = cfg.Analysis.Profile
+		}
+		if profile == "" {
+			profile = status.Backend
+		}
+		parts = append(parts, "- **Analysis mode:** `local-agent`", "- **Agent:** `"+status.Backend+"`", "- **Profile:** `"+profile+"`")
+	} else {
+		visionConfig, err := cfg.ActiveVisionConfig()
+		if err != nil {
+			parts = append(parts, "- **Analysis mode:** `vision`", "- **Vision profile:** unavailable")
+		} else {
+			parts = append(parts, "- **Analysis mode:** `vision`", "- **Vision protocol:** `"+config.NormalizeProtocol(visionConfig.Protocol, visionConfig.Provider)+"`", "- **Model:** `"+visionConfig.Model+"`")
+		}
 	}
 	if !status.LastFinished.IsZero() {
 		parts = append(parts, "- **Last duration:** `"+status.LastDuration.Round(time.Millisecond).String()+"`")
@@ -243,6 +324,34 @@ func formatStatus(status workflow.Status, cfg config.Config) string {
 	if strings.TrimSpace(status.LastWarning) != "" {
 		parts = append(parts, "- **Last warning:** "+strings.ReplaceAll(status.LastWarning, "\n", " "))
 	}
+	if strings.TrimSpace(status.SessionID) != "" {
+		parts = append(parts, "- **Session:** `"+status.SessionID+"`")
+	}
+	return strings.Join(parts, "\n")
+}
+
+func formatAgents(cfg config.Config) string {
+	parts := []string{"# Local agent profiles", "", "Use `/screen [profile]` to select one for a single capture."}
+	if cfg.Analysis.Mode == config.AnalysisModeLocalAgent {
+		parts = append(parts, "", "- **Active:** `"+cfg.Analysis.Profile+"`")
+	}
+	names := make([]string, 0, len(cfg.Analysis.Profiles))
+	visionNames := make([]string, 0, len(cfg.Analysis.Profiles))
+	for name, profile := range cfg.Analysis.Profiles {
+		if profile.Type == config.AnalysisProfileTypeLocalAgent {
+			names = append(names, name)
+		} else if profile.Type == config.AnalysisProfileTypeVisionAPI {
+			visionNames = append(visionNames, name)
+		}
+	}
+	sort.Strings(names)
+	sort.Strings(visionNames)
+	for _, name := range visionNames {
+		parts = append(parts, "- `"+name+"` (hosted vision API)")
+	}
+	for _, name := range names {
+		parts = append(parts, "- `"+name+"`")
+	}
 	return strings.Join(parts, "\n")
 }
 
@@ -252,13 +361,21 @@ func telegramRestartRequired(current, next config.TelegramConfig) bool {
 		current.Proxy != next.Proxy {
 		return true
 	}
-	if len(current.AllowedUserIDs) != len(next.AllowedUserIDs) {
-		return true
+	return !sameUserIDs(current.AllowedUserIDs, next.AllowedUserIDs)
+}
+
+func sameUserIDs(left, right []int64) bool {
+	if len(left) != len(right) {
+		return false
 	}
-	for index := range current.AllowedUserIDs {
-		if current.AllowedUserIDs[index] != next.AllowedUserIDs[index] {
-			return true
+	seen := make(map[int64]struct{}, len(left))
+	for _, userID := range left {
+		seen[userID] = struct{}{}
+	}
+	for _, userID := range right {
+		if _, ok := seen[userID]; !ok {
+			return false
 		}
 	}
-	return false
+	return true
 }

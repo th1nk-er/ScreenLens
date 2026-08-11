@@ -21,6 +21,8 @@ const (
 	commandScreen = "screen"
 	commandReload = "reload"
 	commandStatus = "status"
+	commandAgent  = "agent"
+	commandCancel = "cancel"
 	commandHelp   = "help"
 	statusRunning = "running"
 )
@@ -34,10 +36,13 @@ type Sender interface {
 }
 
 type Handlers struct {
-	Context  context.Context
-	OnScreen func(context.Context, string) error
-	OnReload func(context.Context) error
-	Status   func() string
+	Context         context.Context
+	OnScreen        func(context.Context, string) error
+	OnScreenProfile func(context.Context, string, string) error
+	OnReload        func(context.Context) error
+	OnCancel        func(context.Context) bool
+	Agents          func() string
+	Status          func() string
 }
 
 type Bot struct {
@@ -91,6 +96,8 @@ func registerCommands(bot *tele.Bot) error {
 		{Text: commandScreen, Description: "Capture and analyze the current screen"},
 		{Text: commandReload, Description: "Reload capture and vision configuration"},
 		{Text: commandStatus, Description: "Show ScreenLens runtime status"},
+		{Text: commandAgent, Description: "List or select a local agent profile"},
+		{Text: commandCancel, Description: "Cancel the active capture"},
 		{Text: commandHelp, Description: "Show available commands"},
 	})
 }
@@ -160,13 +167,27 @@ func (b *Bot) registerHandlers() {
 			return nil
 		}
 		target := c.Chat().Recipient()
-		if err := sendRich(c, "Capturing and analyzing the current screen..."); err != nil {
+		profile := ""
+		if c.Message() != nil {
+			profile = strings.TrimSpace(c.Message().Payload)
+		}
+		message := "Capturing and analyzing the current screen..."
+		if profile != "" {
+			message = "Capturing and analyzing with profile `" + profile + "`..."
+		}
+		if err := sendRich(c, message); err != nil {
 			return err
 		}
-		if b.handlers.OnScreen == nil {
+		if b.handlers.OnScreen == nil && b.handlers.OnScreenProfile == nil {
 			return sendRich(c, "Screen capture is not configured.")
 		}
-		if err := b.handlers.OnScreen(b.handlerContext(), target); err != nil {
+		var err error
+		if b.handlers.OnScreenProfile != nil {
+			err = b.handlers.OnScreenProfile(b.handlerContext(), target, profile)
+		} else {
+			err = b.handlers.OnScreen(b.handlerContext(), target)
+		}
+		if err != nil {
 			return sendRich(c, "Unable to queue capture: "+err.Error())
 		}
 		return nil
@@ -196,11 +217,34 @@ func (b *Bot) registerHandlers() {
 		return sendRich(c, status)
 	})
 
+	b.bot.Handle("/"+commandAgent, func(c tele.Context) error {
+		if !b.authorized(c) {
+			return nil
+		}
+		if b.handlers.Agents == nil {
+			return sendRich(c, "Local agent profiles are not configured.")
+		}
+		return sendRich(c, b.handlers.Agents())
+	})
+
+	b.bot.Handle("/"+commandCancel, func(c tele.Context) error {
+		if !b.authorized(c) {
+			return nil
+		}
+		if b.handlers.OnCancel == nil {
+			return sendRich(c, "Cancellation is not configured.")
+		}
+		if !b.handlers.OnCancel(b.handlerContext()) {
+			return sendRich(c, "No capture is currently running.")
+		}
+		return sendRich(c, "Capture cancellation requested.")
+	})
+
 	b.bot.Handle("/"+commandHelp, func(c tele.Context) error {
 		if !b.authorized(c) {
 			return nil
 		}
-		return sendRichHTML(c, `<h1>ScreenLens commands</h1><ul><li><code>/screen</code> — capture and analyze the current screen</li><li><code>/reload</code> — reload capture and vision configuration</li><li><code>/status</code> — show runtime status</li><li><code>/help</code> — show this help</li></ul>`)
+		return sendRichHTML(c, `<h1>ScreenLens commands</h1><ul><li><code>/screen [profile]</code> - capture and analyze the current screen</li><li><code>/agent</code> - list local agent profiles</li><li><code>/cancel</code> - cancel the active capture</li><li><code>/reload</code> - reload configuration</li><li><code>/status</code> - show runtime status</li><li><code>/help</code> - show this help</li></ul>`)
 	})
 }
 

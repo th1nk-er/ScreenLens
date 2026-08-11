@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -38,6 +39,10 @@ const (
 	DefaultVisionRetryCount     = 3
 	DefaultVisionMaxTokens      = 2048
 	DefaultVisionRequestTimeout = 2 * time.Minute
+	DefaultAgentTimeout         = "5m"
+	DefaultAgentMaxOutputBytes  = 2 * 1024 * 1024
+	DefaultAgentMaxOutputTokens = 8192
+	DefaultAgentRetryCount      = 1
 
 	DefaultTelegramParseMode      = "MarkdownV2"
 	DefaultTelegramPollTimeout    = 10
@@ -47,6 +52,21 @@ const (
 	DefaultAPIKeyPrefix = "Bearer"
 	DefaultAppName      = "ScreenLens"
 	DefaultHotkey       = "CTRL+SHIFT+S"
+)
+
+const (
+	AnalysisModeVision     = "vision"
+	AnalysisModeLocalAgent = "local-agent"
+
+	AnalysisProfileTypeVisionAPI  = "vision-api"
+	AnalysisProfileTypeLocalAgent = "local-agent"
+
+	LocalAgentProviderAuto = "auto"
+	LocalAgentTransportCLI = "cli"
+	LocalAgentWorkDirTemp  = "temp"
+
+	LocalAgentSessionEphemeral  = "ephemeral"
+	LocalAgentSessionPersistent = "persistent"
 )
 
 const (
@@ -62,12 +82,14 @@ const (
 	endpointAnthropic       = "https://api.anthropic.com/v1/messages"
 )
 
-// Config is the complete runtime configuration for ScreenLens.
+// Config is the complete runtime configuration for ScreenLens. All analysis
+// backends are configured below Analysis; there is deliberately no separate
+// top-level vision or local-agent configuration tree.
 type Config struct {
 	App      AppConfig      `yaml:"app"`
 	Hotkey   HotkeyConfig   `yaml:"hotkey"`
 	Capture  CaptureConfig  `yaml:"capture"`
-	Vision   VisionConfig   `yaml:"vision"`
+	Analysis AnalysisConfig `yaml:"analysis"`
 	Telegram TelegramConfig `yaml:"telegram"`
 	Tray     TrayConfig     `yaml:"tray"`
 }
@@ -91,19 +113,37 @@ type CaptureConfig struct {
 	MaxBytes  int    `yaml:"max_bytes"`
 }
 
+// AnalysisConfig owns the common analysis contract: the active mode/profile,
+// the single configured prompt, execution limits, and all backend profiles.
+type AnalysisConfig struct {
+	Mode           string                     `yaml:"mode"`
+	Profile        string                     `yaml:"profile"`
+	Prompt         string                     `yaml:"prompt"`
+	Timeout        string                     `yaml:"timeout"`
+	MaxOutputBytes int                        `yaml:"max_output_bytes"`
+	Session        string                     `yaml:"session"`
+	Profiles       map[string]AnalysisProfile `yaml:"profiles"`
+}
+
+// AnalysisProfile keeps provider-specific fields isolated while sharing the
+// common analysis settings above. Exactly one backend section is used based on
+// Type.
+type AnalysisProfile struct {
+	Type       string            `yaml:"type"`
+	Vision     VisionConfig      `yaml:"vision"`
+	LocalAgent LocalAgentProfile `yaml:"local_agent"`
+}
+
 // VisionConfig describes a protocol adapter rather than a particular vendor.
-// This is what allows OpenAI-compatible third-party services to be configured
-// without adding a new package for every vendor.
 type VisionConfig struct {
 	Protocol       string            `yaml:"protocol"`
-	Provider       string            `yaml:"provider"` // Deprecated alias for protocol/vendor labels.
+	Provider       string            `yaml:"provider"`
 	Endpoint       string            `yaml:"endpoint"`
 	Model          string            `yaml:"model"`
 	APIKey         string            `yaml:"api_key"`
 	APIKeyHeader   string            `yaml:"api_key_header"`
 	APIKeyPrefix   string            `yaml:"api_key_prefix"`
 	Headers        map[string]string `yaml:"headers"`
-	Prompt         string            `yaml:"prompt"`
 	Timeout        string            `yaml:"timeout"`
 	RetryCount     int               `yaml:"retry_count"`
 	MaxTokens      int               `yaml:"max_tokens"`
@@ -111,11 +151,27 @@ type VisionConfig struct {
 	Proxy          ProxyConfig       `yaml:"proxy"`
 }
 
+// LocalAgentProfile contains provider-neutral CLI settings. Empty Command and
+// Args select the built-in defaults for the named Provider.
+type LocalAgentProfile struct {
+	Provider        string            `yaml:"provider"`
+	Transport       string            `yaml:"transport"`
+	Command         string            `yaml:"command"`
+	Args            []string          `yaml:"args"`
+	WorkDir         string            `yaml:"work_dir"`
+	Timeout         string            `yaml:"timeout"`
+	MaxOutputBytes  int               `yaml:"max_output_bytes"`
+	MaxOutputTokens int               `yaml:"max_output_tokens"`
+	RetryCount      *int              `yaml:"retry_count"`
+	Env             map[string]string `yaml:"env"`
+	Session         string            `yaml:"session"`
+}
+
 type TelegramConfig struct {
 	Token          string      `yaml:"token"`
 	ChatID         string      `yaml:"chat_id"`
 	AllowedUserIDs []int64     `yaml:"allowed_user_ids"`
-	ParseMode      string      `yaml:"parse_mode"` // Legacy setting; text uses RichMessage Markdown.
+	ParseMode      string      `yaml:"parse_mode"`
 	PollTimeout    int         `yaml:"poll_timeout"`
 	Timeout        string      `yaml:"timeout"`
 	SendImage      bool        `yaml:"send_image"`
@@ -132,6 +188,14 @@ type TrayConfig struct {
 }
 
 func Defaults() Config {
+	vision := VisionConfig{
+		Protocol:   ProtocolOpenAIChat,
+		Endpoint:   endpointOpenAIChat,
+		Model:      DefaultVisionModel,
+		Timeout:    DefaultVisionTimeout,
+		RetryCount: DefaultVisionRetryCount,
+		MaxTokens:  DefaultVisionMaxTokens,
+	}
 	return Config{
 		App: AppConfig{Name: DefaultAppName},
 		Hotkey: HotkeyConfig{
@@ -146,14 +210,30 @@ func Defaults() Config {
 			MaxHeight: DefaultCaptureMaxHeight,
 			MaxBytes:  DefaultCaptureMaxBytes,
 		},
-		Vision: VisionConfig{
-			Protocol:   ProtocolOpenAIChat,
-			Endpoint:   endpointOpenAIChat,
-			Model:      DefaultVisionModel,
-			Prompt:     defaultPrompt,
-			Timeout:    DefaultVisionTimeout,
-			RetryCount: DefaultVisionRetryCount,
-			MaxTokens:  DefaultVisionMaxTokens,
+		Analysis: AnalysisConfig{
+			Mode:           AnalysisModeLocalAgent,
+			Profile:        LocalAgentProviderAuto,
+			Timeout:        DefaultAgentTimeout,
+			MaxOutputBytes: DefaultAgentMaxOutputBytes,
+			Session:        LocalAgentSessionEphemeral,
+			Profiles: map[string]AnalysisProfile{
+				"vision": {
+					Type:   AnalysisProfileTypeVisionAPI,
+					Vision: vision,
+				},
+				"codex": {
+					Type:       AnalysisProfileTypeLocalAgent,
+					LocalAgent: LocalAgentProfile{Provider: "codex", Transport: LocalAgentTransportCLI, RetryCount: intPointer(DefaultAgentRetryCount)},
+				},
+				"claude": {
+					Type:       AnalysisProfileTypeLocalAgent,
+					LocalAgent: LocalAgentProfile{Provider: "claude", Transport: LocalAgentTransportCLI, RetryCount: intPointer(DefaultAgentRetryCount)},
+				},
+				"opencode": {
+					Type:       AnalysisProfileTypeLocalAgent,
+					LocalAgent: LocalAgentProfile{Provider: "opencode", Transport: LocalAgentTransportCLI, RetryCount: intPointer(DefaultAgentRetryCount)},
+				},
+			},
 		},
 		Telegram: TelegramConfig{
 			ParseMode:   DefaultTelegramParseMode,
@@ -164,26 +244,23 @@ func Defaults() Config {
 	}
 }
 
-const defaultPrompt = `Analyze this screenshot and answer in concise Markdown.
-
-Include:
-- Current application or context
-- Important information visible on screen
-- Potential problems or recommended next actions
-
-If something is uncertain, say so explicitly.`
-
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %q: %w", path, err)
 	}
-
 	cfg := Defaults()
 	data = []byte(os.ExpandEnv(string(data)))
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
+		return Config{}, fmt.Errorf("parse config %q: %w", path, err)
+	}
+	var extraDocument any
+	if err := decoder.Decode(&extraDocument); err != io.EOF {
+		if err == nil {
+			return Config{}, fmt.Errorf("parse config %q: multiple YAML documents are not supported", path)
+		}
 		return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 	}
 	if err := cfg.NormalizeAndValidate(); err != nil {
@@ -222,7 +299,7 @@ func (c *Config) NormalizeAndValidate() error {
 		c.Capture.Quality = DefaultCaptureQuality
 	}
 	if c.Capture.Quality < 1 || c.Capture.Quality > 100 {
-		return fmt.Errorf("capture.quality must be between 1 and 100")
+		return errors.New("capture.quality must be between 1 and 100")
 	}
 	if c.Capture.MaxWidth == 0 {
 		c.Capture.MaxWidth = DefaultCaptureMaxWidth
@@ -240,44 +317,11 @@ func (c *Config) NormalizeAndValidate() error {
 		return errors.New("capture.max_bytes must be positive")
 	}
 
-	c.Vision.Protocol = NormalizeProtocol(c.Vision.Protocol, c.Vision.Provider)
-	if c.Vision.Protocol == "" {
-		c.Vision.Protocol = ProtocolOpenAIChat
+	if err := c.normalizeAnalysis(); err != nil {
+		return err
 	}
-	if !IsSupportedProtocol(c.Vision.Protocol) {
-		return fmt.Errorf("unsupported vision.protocol %q", c.Vision.Protocol)
-	}
-	if c.Vision.Model = strings.TrimSpace(c.Vision.Model); c.Vision.Model == "" {
-		return errors.New("vision.model is required")
-	}
-	if c.Vision.Endpoint == "" {
-		c.Vision.Endpoint = DefaultEndpoint(c.Vision.Protocol)
-	}
-	if c.Vision.Prompt == "" {
-		c.Vision.Prompt = defaultPrompt
-	}
-	if c.Vision.MaxTokens == 0 {
-		c.Vision.MaxTokens = DefaultVisionMaxTokens
-	}
-	if c.Vision.MaxTokens < 1 {
-		return errors.New("vision.max_tokens must be positive")
-	}
-	if c.Vision.RetryCount < 0 {
-		return errors.New("vision.retry_count must not be negative")
-	}
-	if c.Vision.APIKeyHeader == "" {
-		c.Vision.APIKeyHeader = DefaultAPIKeyHeader(c.Vision.Protocol)
-	}
-	if c.Vision.APIKeyPrefix == "" && c.Vision.Protocol != ProtocolAnthropicMessages {
-		c.Vision.APIKeyPrefix = DefaultAPIKeyPrefix
-	}
-	if c.Vision.MaxTokensField == "" {
-		c.Vision.MaxTokensField = DefaultMaxTokensField(c.Vision.Protocol)
-	}
-	if c.Vision.Timeout != "" {
-		if timeout, err := time.ParseDuration(c.Vision.Timeout); err != nil || timeout <= 0 {
-			return fmt.Errorf("vision.timeout must be a positive duration")
-		}
+	if err := c.normalizeAnalysisProfiles(); err != nil {
+		return err
 	}
 
 	c.Telegram.Token = strings.TrimSpace(c.Telegram.Token)
@@ -301,22 +345,209 @@ func (c *Config) NormalizeAndValidate() error {
 	case "", "plain", "text":
 		c.Telegram.ParseMode = ""
 	default:
-		return fmt.Errorf("telegram.parse_mode must be MarkdownV2, Markdown, HTML, or plain")
+		return errors.New("telegram.parse_mode must be MarkdownV2, Markdown, HTML, or plain")
 	}
 	if c.Telegram.PollTimeout <= 0 {
 		c.Telegram.PollTimeout = DefaultTelegramPollTimeout
 	}
 	if c.Telegram.Timeout != "" {
 		if timeout, err := time.ParseDuration(c.Telegram.Timeout); err != nil || timeout <= 0 {
-			return fmt.Errorf("telegram.timeout must be a positive duration")
+			return errors.New("telegram.timeout must be a positive duration")
 		}
 	}
 	for _, userID := range c.Telegram.AllowedUserIDs {
 		if userID <= 0 {
-			return fmt.Errorf("telegram.allowed_user_ids must contain positive user IDs")
+			return errors.New("telegram.allowed_user_ids must contain positive user IDs")
 		}
 	}
 	return nil
+}
+
+func (c *Config) normalizeAnalysis() error {
+	c.Analysis.Mode = strings.ToLower(strings.TrimSpace(c.Analysis.Mode))
+	switch c.Analysis.Mode {
+	case "", "agent", "local", AnalysisModeLocalAgent:
+		c.Analysis.Mode = AnalysisModeLocalAgent
+	case "api", "direct", AnalysisModeVision:
+		c.Analysis.Mode = AnalysisModeVision
+	default:
+		return fmt.Errorf("analysis.mode must be %s or %s", AnalysisModeVision, AnalysisModeLocalAgent)
+	}
+	c.Analysis.Profile = strings.ToLower(strings.TrimSpace(c.Analysis.Profile))
+	if c.Analysis.Mode == AnalysisModeLocalAgent && c.Analysis.Profile == "" {
+		c.Analysis.Profile = LocalAgentProviderAuto
+	}
+	if c.Analysis.Mode == AnalysisModeVision && c.Analysis.Profile == "" {
+		c.Analysis.Profile = "vision"
+	}
+	c.Analysis.Prompt = strings.TrimSpace(c.Analysis.Prompt)
+	if c.Analysis.Prompt == "" {
+		return errors.New("analysis.prompt is required; configure it in the YAML file")
+	}
+	if c.Analysis.Timeout == "" {
+		c.Analysis.Timeout = DefaultAgentTimeout
+	}
+	if timeout, err := time.ParseDuration(c.Analysis.Timeout); err != nil || timeout <= 0 {
+		return errors.New("analysis.timeout must be a positive duration")
+	}
+	if c.Analysis.MaxOutputBytes == 0 {
+		c.Analysis.MaxOutputBytes = DefaultAgentMaxOutputBytes
+	}
+	if c.Analysis.MaxOutputBytes < 1 {
+		return errors.New("analysis.max_output_bytes must be positive")
+	}
+	c.Analysis.Session = strings.ToLower(strings.TrimSpace(c.Analysis.Session))
+	if c.Analysis.Session == "" {
+		c.Analysis.Session = LocalAgentSessionEphemeral
+	}
+	if c.Analysis.Session != LocalAgentSessionEphemeral && c.Analysis.Session != LocalAgentSessionPersistent {
+		return errors.New("analysis.session must be ephemeral or persistent")
+	}
+	return nil
+}
+
+func (c *Config) normalizeAnalysisProfiles() error {
+	if len(c.Analysis.Profiles) == 0 {
+		return errors.New("analysis.profiles must contain at least one profile")
+	}
+	normalized := make(map[string]AnalysisProfile, len(c.Analysis.Profiles))
+	for rawName, profile := range c.Analysis.Profiles {
+		name := strings.ToLower(strings.TrimSpace(rawName))
+		if name == "" {
+			return errors.New("analysis.profiles must not contain an empty profile name")
+		}
+		if _, exists := normalized[name]; exists {
+			return fmt.Errorf("analysis.profiles contains duplicate profile name %q", name)
+		}
+		profile.Type = strings.ToLower(strings.TrimSpace(profile.Type))
+		switch profile.Type {
+		case AnalysisProfileTypeVisionAPI:
+			if err := normalizeVisionProfile(&profile.Vision); err != nil {
+				return fmt.Errorf("analysis.profiles.%s.vision: %w", name, err)
+			}
+		case AnalysisProfileTypeLocalAgent:
+			if err := normalizeLocalAgentProfile(&profile.LocalAgent, name, c.Analysis); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("analysis.profiles.%s.type must be %s or %s", name, AnalysisProfileTypeVisionAPI, AnalysisProfileTypeLocalAgent)
+		}
+		normalized[name] = profile
+	}
+	c.Analysis.Profiles = normalized
+	if c.Analysis.Mode == AnalysisModeVision {
+		profile, ok := c.Analysis.Profiles[c.Analysis.Profile]
+		if !ok || profile.Type != AnalysisProfileTypeVisionAPI {
+			return fmt.Errorf("analysis.profile %q must reference a vision-api profile", c.Analysis.Profile)
+		}
+	}
+	if c.Analysis.Mode == AnalysisModeLocalAgent && c.Analysis.Profile != LocalAgentProviderAuto {
+		profile, ok := c.Analysis.Profiles[c.Analysis.Profile]
+		if !ok || profile.Type != AnalysisProfileTypeLocalAgent {
+			return fmt.Errorf("analysis.profile %q must reference a local-agent profile", c.Analysis.Profile)
+		}
+	}
+	return nil
+}
+
+func normalizeVisionProfile(c *VisionConfig) error {
+	c.Protocol = NormalizeProtocol(c.Protocol, c.Provider)
+	if c.Protocol == "" {
+		return errors.New("protocol is required")
+	}
+	if !IsSupportedProtocol(c.Protocol) {
+		return fmt.Errorf("unsupported protocol %q", c.Protocol)
+	}
+	c.Model = strings.TrimSpace(c.Model)
+	if c.Model == "" {
+		return errors.New("model is required")
+	}
+	if c.Endpoint == "" {
+		c.Endpoint = DefaultEndpoint(c.Protocol)
+	}
+	if c.MaxTokens == 0 {
+		c.MaxTokens = DefaultVisionMaxTokens
+	}
+	if c.MaxTokens < 1 {
+		return errors.New("max_tokens must be positive")
+	}
+	if c.RetryCount < 0 {
+		return errors.New("retry_count must not be negative")
+	}
+	if c.APIKeyHeader == "" {
+		c.APIKeyHeader = DefaultAPIKeyHeader(c.Protocol)
+	}
+	if c.APIKeyPrefix == "" && c.Protocol != ProtocolAnthropicMessages {
+		c.APIKeyPrefix = DefaultAPIKeyPrefix
+	}
+	if c.MaxTokensField == "" {
+		c.MaxTokensField = DefaultMaxTokensField(c.Protocol)
+	}
+	if c.Timeout != "" {
+		if timeout, err := time.ParseDuration(c.Timeout); err != nil || timeout <= 0 {
+			return errors.New("timeout must be a positive duration")
+		}
+	}
+	return nil
+}
+
+func normalizeLocalAgentProfile(profile *LocalAgentProfile, name string, analysis AnalysisConfig) error {
+	profile.Provider = strings.ToLower(strings.TrimSpace(profile.Provider))
+	if profile.Provider == "" {
+		return fmt.Errorf("analysis.profiles.%s.local_agent.provider is required", name)
+	}
+	profile.Transport = strings.ToLower(strings.TrimSpace(profile.Transport))
+	if profile.Transport == "" {
+		profile.Transport = LocalAgentTransportCLI
+	}
+	if profile.Transport != LocalAgentTransportCLI {
+		return fmt.Errorf("analysis.profiles.%s.local_agent.transport must be %s", name, LocalAgentTransportCLI)
+	}
+	profile.Session = strings.ToLower(strings.TrimSpace(profile.Session))
+	if profile.Session == "" {
+		profile.Session = analysis.Session
+	}
+	if profile.Session != LocalAgentSessionEphemeral && profile.Session != LocalAgentSessionPersistent {
+		return fmt.Errorf("analysis.profiles.%s.local_agent.session must be ephemeral or persistent", name)
+	}
+	if profile.MaxOutputBytes < 0 {
+		return fmt.Errorf("analysis.profiles.%s.local_agent.max_output_bytes must not be negative", name)
+	}
+	if profile.MaxOutputTokens == 0 {
+		profile.MaxOutputTokens = DefaultAgentMaxOutputTokens
+	}
+	if profile.MaxOutputTokens < 1 {
+		return fmt.Errorf("analysis.profiles.%s.local_agent.max_output_tokens must be positive", name)
+	}
+	if profile.RetryCount != nil && *profile.RetryCount < 0 {
+		return fmt.Errorf("analysis.profiles.%s.local_agent.retry_count must not be negative", name)
+	}
+	if profile.RetryCount == nil {
+		profile.RetryCount = intPointer(DefaultAgentRetryCount)
+	}
+	return nil
+}
+
+func intPointer(value int) *int {
+	return &value
+}
+
+func (c Config) ActiveVisionConfig() (VisionConfig, error) {
+	profile, ok := c.Analysis.Profiles[c.Analysis.Profile]
+	if !ok || profile.Type != AnalysisProfileTypeVisionAPI {
+		return VisionConfig{}, fmt.Errorf("analysis profile %q is not a vision-api profile", c.Analysis.Profile)
+	}
+	return profile.Vision, nil
+}
+
+func (c Config) LocalAgentProfiles() map[string]LocalAgentProfile {
+	profiles := make(map[string]LocalAgentProfile)
+	for name, profile := range c.Analysis.Profiles {
+		if profile.Type == AnalysisProfileTypeLocalAgent {
+			profiles[name] = profile.LocalAgent
+		}
+	}
+	return profiles
 }
 
 func NormalizeProtocol(protocol, provider string) string {

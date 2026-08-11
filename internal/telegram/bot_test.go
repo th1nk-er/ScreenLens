@@ -142,7 +142,7 @@ func TestRegisterCommands(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		if len(payload.Commands) != 4 || payload.Commands[0].Text != "screen" || payload.Commands[3].Text != "help" {
+		if len(payload.Commands) != 6 || payload.Commands[0].Text != "screen" || payload.Commands[5].Text != "help" {
 			t.Fatalf("commands = %+v", payload.Commands)
 		}
 		w.Header().Set("Content-Type", "application/json")
