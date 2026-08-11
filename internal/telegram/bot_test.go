@@ -6,9 +6,55 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	tele "gopkg.in/telebot.v4"
 )
+
+type blockingPoller struct{}
+
+func (blockingPoller) Poll(_ *tele.Bot, _ chan tele.Update, stop chan struct{}) {
+	<-stop
+}
+
+func TestStopIsIdempotent(t *testing.T) {
+	teleBot, err := tele.NewBot(tele.Settings{
+		Token:   "TOKEN",
+		Offline: true,
+		Poller:  blockingPoller{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bot := &Bot{bot: teleBot}
+	started := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		close(started)
+		bot.Start()
+		close(finished)
+	}()
+	<-started
+
+	stopped := make(chan struct{})
+	go func() {
+		bot.Stop()
+		bot.Stop()
+		close(stopped)
+	}()
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not return for repeated calls")
+	}
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("bot did not finish after Stop")
+	}
+}
 
 func TestSendTextUsesRichMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

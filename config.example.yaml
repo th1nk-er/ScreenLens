@@ -1,5 +1,7 @@
 app:
   name: ScreenLens
+  # Empty uses screenlens.log next to the executable.
+  log_file: ""
 
 hotkey:
   enabled: true

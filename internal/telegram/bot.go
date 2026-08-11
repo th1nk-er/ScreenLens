@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tele "gopkg.in/telebot.v4"
@@ -33,6 +34,7 @@ type Bot struct {
 	chatID   string
 	allowed  map[int64]struct{}
 	handlers Handlers
+	stopOnce sync.Once
 }
 
 type recipient string
@@ -70,13 +72,6 @@ func New(cfg config.TelegramConfig, handlers Handlers) (*Bot, error) {
 	}
 	b := &Bot{bot: bot, chatID: cfg.ChatID, allowed: allowed, handlers: handlers}
 	b.registerHandlers()
-	if handlers.Context != nil && handlers.Context.Done() != nil {
-		done := handlers.Context.Done()
-		go func() {
-			<-done
-			b.Stop()
-		}()
-	}
 	return b, nil
 }
 
@@ -94,7 +89,9 @@ func (b *Bot) Start() {
 }
 
 func (b *Bot) Stop() {
-	b.bot.Stop()
+	b.stopOnce.Do(func() {
+		b.bot.Stop()
+	})
 }
 
 func (b *Bot) SendText(ctx context.Context, target, text string) error {

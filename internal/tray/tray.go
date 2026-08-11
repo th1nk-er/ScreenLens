@@ -2,16 +2,9 @@ package tray
 
 import (
 	"context"
-	_ "embed"
 
 	"github.com/getlantern/systray"
 )
-
-// The generated icon is embedded so the tray still has a valid icon when the
-// executable is launched from a different working directory.
-//
-//go:embed icon.ico
-var iconBytes []byte
 
 type Actions struct {
 	Capture func()

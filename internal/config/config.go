@@ -30,7 +30,8 @@ type Config struct {
 }
 
 type AppConfig struct {
-	Name string `yaml:"name"`
+	Name    string `yaml:"name"`
+	LogFile string `yaml:"log_file"`
 }
 
 type HotkeyConfig struct {
@@ -148,6 +149,7 @@ func Load(path string) (Config, error) {
 
 func (c *Config) NormalizeAndValidate() error {
 	c.App.Name = strings.TrimSpace(c.App.Name)
+	c.App.LogFile = strings.TrimSpace(c.App.LogFile)
 	if c.App.Name == "" {
 		c.App.Name = "ScreenLens"
 	}

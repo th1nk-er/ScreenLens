@@ -8,6 +8,8 @@ require (
 	github.com/robotn/gohook v0.42.3
 	golang.org/x/image v0.44.0
 	golang.org/x/net v0.57.0
+	golang.org/x/sys v0.47.0
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/telebot.v4 v4.0.0-beta.10
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -26,5 +28,4 @@ require (
 	github.com/lxn/win v0.0.0-20210218163916-a377121e959e // indirect
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
 	github.com/vcaesar/keycode v0.10.1 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 )

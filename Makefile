@@ -5,19 +5,37 @@ CONFIG   ?= config.yaml
 GO       ?= go
 GOFLAGS  ?=
 LDFLAGS  ?=
+GUI_TAGS    ?= gui
 
 ifeq ($(OS),Windows_NT)
-  BINARY := $(BIN_DIR)/$(APP).exe
+  GUI_LDFLAGS ?= -H=windowsgui
 else
-  BINARY := $(BIN_DIR)/$(APP)
+  GUI_LDFLAGS ?=
 endif
 
-.PHONY: all build fmt tidy test race vet check run install clean
+ifeq ($(OS),Windows_NT)
+  GUI_BINARY     := $(BIN_DIR)/$(APP).exe
+  CONSOLE_BINARY := $(BIN_DIR)/$(APP)-console.exe
+else
+  GUI_BINARY     := $(BIN_DIR)/$(APP)
+  CONSOLE_BINARY := $(BIN_DIR)/$(APP)-console
+endif
+
+.PHONY: all build build-gui build-console fmt tidy test race vet check run run-gui install install-gui clean
+
+ifeq ($(OS),Windows_NT)
+build: build-gui
+else
+build: build-console
+endif
 
 all: check build
 
-build:
-	@$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o "$(BINARY)" $(CMD)
+build-gui:
+	@$(GO) build $(GOFLAGS) -tags "$(GUI_TAGS)" -ldflags "$(GUI_LDFLAGS) $(LDFLAGS)" -o "$(GUI_BINARY)" $(CMD)
+
+build-console:
+	@$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o "$(CONSOLE_BINARY)" $(CMD)
 
 fmt:
 	@gofmt -w cmd internal
@@ -39,8 +57,14 @@ check: fmt tidy test vet
 run:
 	@$(GO) run $(CMD) -config "$(CONFIG)"
 
+run-gui:
+	@$(GO) run -tags "$(GUI_TAGS)" -ldflags "$(GUI_LDFLAGS)" $(CMD) -config "$(CONFIG)"
+
 install:
 	@$(GO) install $(CMD)
+
+install-gui:
+	@$(GO) install -tags "$(GUI_TAGS)" -ldflags "$(GUI_LDFLAGS)" $(CMD)
 
 clean:
 	@$(GO) clean

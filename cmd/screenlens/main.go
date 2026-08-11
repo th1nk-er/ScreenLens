@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/th1nk-er/ScreenLens/internal/config"
 	"github.com/th1nk-er/ScreenLens/internal/hotkey"
+	"github.com/th1nk-er/ScreenLens/internal/instance"
+	"github.com/th1nk-er/ScreenLens/internal/logging"
 	"github.com/th1nk-er/ScreenLens/internal/screenshot"
 	"github.com/th1nk-er/ScreenLens/internal/telegram"
 	"github.com/th1nk-er/ScreenLens/internal/tray"
@@ -23,7 +26,13 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "path to the YAML configuration file")
 	flag.Parse()
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logHandle, err := logging.Open("", buildMode == "console")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "initialize logging: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() { _ = logHandle.Close() }()
+	logger := logHandle.Logger
 	slog.SetDefault(logger)
 
 	cfg, err := config.Load(*configPath)
@@ -31,6 +40,36 @@ func main() {
 		logger.Error("load configuration", "error", err)
 		os.Exit(1)
 	}
+	if cfg.App.LogFile != "" {
+		configuredPath, pathErr := logging.ResolvePath(cfg.App.LogFile)
+		if pathErr != nil {
+			logger.Error("resolve configured log file", "error", pathErr)
+			os.Exit(1)
+		}
+		if configuredPath != logHandle.Path {
+			previousLogHandle := logHandle
+			logHandle, err = logging.Open(cfg.App.LogFile, buildMode == "console")
+			if err != nil {
+				logger.Error("initialize configured logging", "error", err)
+				os.Exit(1)
+			}
+			_ = previousLogHandle.Close()
+			logger = logHandle.Logger
+			slog.SetDefault(logger)
+		}
+	}
+	logger.Info("ScreenLens starting", "mode", buildMode, "log_file", logHandle.Path)
+
+	instanceLock, err := instance.Acquire("Local\\ScreenLens")
+	if errors.Is(err, instance.ErrAlreadyRunning) {
+		logger.Warn("another ScreenLens instance is already running")
+		return
+	}
+	if err != nil {
+		logger.Error("initialize single-instance protection", "error", err)
+		os.Exit(1)
+	}
+	defer instanceLock.Close()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -132,7 +171,11 @@ func main() {
 		cancel()
 	}
 
-	if cfg.Tray.Enabled {
+	trayEnabled := buildMode == "gui" || cfg.Tray.Enabled
+	if buildMode == "gui" && !cfg.Tray.Enabled {
+		logger.Info("tray enabled by GUI build mode")
+	}
+	if trayEnabled {
 		go tray.Run(ctx, cfg.App.Name, tray.Actions{
 			Capture: func() {
 				if err := engine.CaptureFrom(ctx, "", "tray"); err != nil {
@@ -147,6 +190,7 @@ func main() {
 			Exit: cancel,
 		})
 	}
+	logger.Info("ScreenLens ready", "hotkey_enabled", cfg.Hotkey.Enabled, "tray_enabled", trayEnabled)
 
 	<-ctx.Done()
 	hotkeyManager.Stop()
