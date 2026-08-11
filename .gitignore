@@ -1,0 +1,15 @@
+# Local configuration and secrets
+config.yaml
+.env
+
+# Build output
+bin/
+dist/
+*.exe
+*.test
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
+Thumbs.db

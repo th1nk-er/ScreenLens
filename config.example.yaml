@@ -1,0 +1,66 @@
+app:
+  name: ScreenLens
+
+hotkey:
+  enabled: true
+  # Keyboard example: CTRL+SHIFT+S
+  # Mouse side buttons: MOUSE_X1 / MOUSE_X2
+  capture: CTRL+SHIFT+S
+
+capture:
+  monitor: primary
+  format: jpeg
+  quality: 85
+  # Downscale before upload and reject oversized encoded images.
+  max_width: 2560
+  max_height: 1440
+  # 7 MiB leaves room for Base64 expansion under Anthropic's 10 MB limit.
+  max_bytes: 7340032
+
+vision:
+  # The protocol is independent from the vendor. Use a custom endpoint and
+  # model for any service implementing one of these APIs.
+  # Supported values: openai-chat-completions, openai-responses,
+  # anthropic-messages.
+  protocol: openai-chat-completions
+  endpoint: https://api.openai.com/v1/chat/completions
+  model: gpt-5.6-sol
+  api_key: ${OPENAI_API_KEY}
+  # api_key_header: Authorization
+  # api_key_prefix: Bearer
+  # headers:
+  #   X-Custom-Header: value
+  timeout: 2m
+  max_tokens: 2048
+  # Optional proxy for OpenAI/Anthropic/compatible LLM requests.
+  # proxy:
+  #   type: socks5
+  #   address: 127.0.0.1:1080
+  # OpenAI Chat Completions defaults to max_completion_tokens. Legacy
+  # OpenAI-compatible providers may override this with max_tokens.
+  # max_tokens_field: max_tokens
+  prompt: |
+    Analyze this screenshot and answer in concise Markdown.
+
+    Include:
+    - Current application or context
+    - Important information visible on screen
+    - Potential problems or recommended next actions
+
+    If something is uncertain, say so explicitly.
+
+telegram:
+  token: ${TELEGRAM_BOT_TOKEN}
+  chat_id: ${TELEGRAM_CHAT_ID}
+  # Required when chat_id points to a group; omit for a private chat.
+  # allowed_user_ids: [123456789]
+  # Text is sent through Telegram RichMessage using extended Markdown.
+  poll_timeout: 10
+  timeout: 30s
+  send_image: true
+  # proxy:
+  #   type: socks5
+  #   address: 127.0.0.1:1080
+
+tray:
+  enabled: false
