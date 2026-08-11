@@ -103,6 +103,15 @@ func TestBuildAndAnalyzeCleansArtifact(t *testing.T) {
 	}
 }
 
+func TestInjectedProcessRunnerDoesNotRequireInstalledCLI(t *testing.T) {
+	if requiresCommandLookup(&recordingRunner{}) {
+		t.Fatal("injected process runner must not require a provider executable")
+	}
+	if !requiresCommandLookup(OSProcessRunner{}) {
+		t.Fatal("OS process runner must validate the provider executable")
+	}
+}
+
 func TestCodexCustomArgsReceiveScreenshotAsImageAttachment(t *testing.T) {
 	runner := &recordingRunner{stdout: `{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}`}
 	analysis := configForTest()

@@ -74,8 +74,10 @@ func buildWithRunner(analysis config.AnalysisConfig, profiles map[string]config.
 	if command == "" {
 		command = defaultCommand(provider)
 	}
-	if _, err := exec.LookPath(command); err != nil {
-		return nil, Info{}, fmt.Errorf("local agent %q is not available as %q; install it or set analysis.profiles.%s.local_agent.command: %w", provider, command, profileName, err)
+	if requiresCommandLookup(runner) {
+		if _, err := exec.LookPath(command); err != nil {
+			return nil, Info{}, fmt.Errorf("local agent %q is not available as %q; install it or set analysis.profiles.%s.local_agent.command: %w", provider, command, profileName, err)
+		}
 	}
 	transport := strings.ToLower(strings.TrimSpace(profile.Transport))
 	if transport == "" {
@@ -142,6 +144,18 @@ func buildWithRunner(analysis config.AnalysisConfig, profiles map[string]config.
 		runner:          runner,
 		prompt:          analysis.Prompt,
 	}, Info{Profile: profileName, Provider: provider, Command: command}, nil
+}
+
+func requiresCommandLookup(runner ProcessRunner) bool {
+	switch runner.(type) {
+	case OSProcessRunner, *OSProcessRunner:
+		return true
+	default:
+		// Test and embedding runners own their command resolution. Requiring a
+		// real provider binary here would make deterministic unit tests depend on
+		// a user's local CLI installation.
+		return false
+	}
 }
 
 func (c *CLI) Analyze(ctx context.Context, request analyzer.Request) (analyzer.Result, error) {
