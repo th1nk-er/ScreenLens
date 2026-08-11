@@ -168,4 +168,3 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/SHA256SUMS
-          fi
