@@ -13,6 +13,15 @@ else
   GUI_LDFLAGS ?=
 endif
 
+TEST_RUNNER ?=
+ifneq ($(OS),Windows_NT)
+  ifeq ($(shell uname -s 2>/dev/null),Linux)
+    ifeq ($(DISPLAY),)
+      TEST_RUNNER := xvfb-run -a
+    endif
+  endif
+endif
+
 ifeq ($(OS),Windows_NT)
   GUI_BINARY     := $(BIN_DIR)/$(APP).exe
   CONSOLE_BINARY := $(BIN_DIR)/$(APP)-console.exe
@@ -44,10 +53,10 @@ tidy:
 	@$(GO) mod tidy
 
 test:
-	@$(GO) test ./...
+	@$(TEST_RUNNER) $(GO) test ./...
 
 race:
-	@$(GO) test -race ./...
+	@$(TEST_RUNNER) $(GO) test -race ./...
 
 vet:
 	@$(GO) vet ./...

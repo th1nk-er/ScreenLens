@@ -36,7 +36,9 @@ jobs:
             libxkbcommon-dev \
             libxkbcommon-x11-dev \
             libxrandr-dev \
-            libxinerama-dev
+            libxinerama-dev \
+            xvfb \
+            xauth
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -44,7 +46,12 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run tests
+      - name: Run tests on Linux
+        if: runner.os == 'Linux'
+        run: xvfb-run -a go test ./...
+
+      - name: Run tests on macOS and Windows
+        if: runner.os != 'Linux'
         run: go test ./...
 
       - name: Run vet

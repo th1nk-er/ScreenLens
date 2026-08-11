@@ -165,6 +165,8 @@ On Windows, `make build` produces the GUI build without a console window. On mac
 
 Linux builds currently target X11 for global keyboard and mouse hooks. Wayland screenshot support depends on the desktop environment, but global hotkey capture under pure Wayland is not supported by the current hook backend.
 
+On headless Linux machines, use `make test` or `make race`; when `DISPLAY` is not set, these targets automatically run through Xvfb so the native hook library can initialize its X11 backend.
+
 The project uses a protocol adapter boundary so additional compatible providers can be added without changing the workflow layer.
 
 ## License
