@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"errors"
+	"image"
 	"sync"
 	"testing"
 	"time"
@@ -70,6 +71,28 @@ type recordingCapture struct{}
 
 func (recordingCapture) Screenshot() ([]byte, error) { return []byte("image"), nil }
 
+type recordingRegionCapture struct {
+	start image.Point
+	end   image.Point
+}
+
+func (c *recordingRegionCapture) Screenshot() ([]byte, error) { return []byte("full"), nil }
+
+func (c *recordingRegionCapture) ScreenshotRegion(start, end image.Point) ([]byte, error) {
+	c.start = start
+	c.end = end
+	return []byte("region"), nil
+}
+
+type recordingRequestAnalyzer struct {
+	requests chan analyzer.Request
+}
+
+func (a recordingRequestAnalyzer) Analyze(_ context.Context, request analyzer.Request) (analyzer.Result, error) {
+	a.requests <- request
+	return analyzer.Result{Text: "analysis"}, nil
+}
+
 type orderedVision struct {
 	sender *recordingSender
 	seen   chan []string
@@ -109,6 +132,36 @@ func TestScreenshotIsDeliveredBeforeAnalysis(t *testing.T) {
 	}
 	if sender.replyTo != 42 {
 		t.Fatalf("replyTo = %d, want 42", sender.replyTo)
+	}
+}
+
+func TestRegionCaptureUsesTheProvidedPoints(t *testing.T) {
+	capture := &recordingRegionCapture{}
+	requests := make(chan analyzer.Request, 1)
+	sender := &recordingSender{}
+	engine := NewAnalyzer(capture, recordingRequestAnalyzer{requests: requests}, sender, "prompt", false, "vision", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = engine.Run(ctx) }()
+
+	start := image.Point{X: 800, Y: 600}
+	end := image.Point{X: 100, Y: 200}
+	if err := engine.CaptureFromRegion(ctx, "123", "region-hotkey", start, end); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case request := <-requests:
+		if string(request.Image) != "region" {
+			t.Fatalf("captured image = %q, want region image", request.Image)
+		}
+		if request.Source != "region-hotkey" {
+			t.Fatalf("request source = %q, want region-hotkey", request.Source)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for region analysis")
+	}
+	if capture.start != start || capture.end != end {
+		t.Fatalf("region points = (%v, %v), want (%v, %v)", capture.start, capture.end, start, end)
 	}
 }
 

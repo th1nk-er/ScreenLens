@@ -20,3 +20,11 @@ func TestResizeToFitDoesNotUpscale(t *testing.T) {
 		t.Fatalf("resized dimensions = %v, want %v", got, source.Bounds().Size())
 	}
 }
+
+func TestRegionRectangleAcceptsEitherPointOrder(t *testing.T) {
+	got := regionRectangle(image.Point{X: 900, Y: 700}, image.Point{X: 100, Y: 200})
+	want := image.Rect(100, 200, 900, 700)
+	if got != want {
+		t.Fatalf("region rectangle = %v, want %v", got, want)
+	}
+}

@@ -52,3 +52,23 @@ func TestNewMouseListener(t *testing.T) {
 		t.Fatalf("mouseButton = %d, want 4", listener.mouseButton)
 	}
 }
+
+func TestNewBindingsRejectsDuplicateShortcuts(t *testing.T) {
+	if _, err := NewBindings([]Binding{
+		{Combination: "CTRL+SHIFT+1"},
+		{Combination: "SHIFT+CTRL+1"},
+	}); err == nil {
+		t.Fatal("duplicate shortcuts were accepted")
+	}
+}
+
+func TestNewBindingsAcceptsRegionShortcutDefaults(t *testing.T) {
+	if _, err := NewBindings([]Binding{
+		{Combination: "CTRL+SHIFT+S"},
+		{Combination: "ALT+SHIFT+S"},
+		{Combination: "ALT+SHIFT+E"},
+		{Combination: "ALT+SHIFT+C"},
+	}); err != nil {
+		t.Fatalf("default region shortcuts rejected: %v", err)
+	}
+}

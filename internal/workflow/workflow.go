@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
 	"log/slog"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ const (
 
 	CaptureSourceRequest  = "request"
 	CaptureSourceHotkey   = "hotkey"
+	CaptureSourceRegion   = "region-hotkey"
 	CaptureSourceTelegram = "telegram"
 	CaptureSourceTray     = "tray"
 )
@@ -38,10 +40,12 @@ type Event struct {
 }
 
 type CaptureEvent struct {
-	Target   string
-	Source   string
-	Profile  string
-	Workflow string
+	Target      string
+	Source      string
+	Profile     string
+	Workflow    string
+	RegionStart *image.Point
+	RegionEnd   *image.Point
 }
 
 type Capture interface {
@@ -158,6 +162,19 @@ func (e *Engine) CaptureFromProfile(ctx context.Context, target, source, profile
 
 func (e *Engine) CaptureFromWorkflow(ctx context.Context, target, source, workflowName string) error {
 	return e.enqueueCapture(ctx, CaptureEvent{Target: target, Source: source, Workflow: workflowName})
+}
+
+// CaptureFromRegion queues a capture using two persistent mouse coordinates.
+// The coordinates are copied so a caller can safely reuse its point values
+// after this method returns.
+func (e *Engine) CaptureFromRegion(ctx context.Context, target, source string, start, end image.Point) error {
+	startCopy, endCopy := start, end
+	return e.enqueueCapture(ctx, CaptureEvent{
+		Target:      target,
+		Source:      source,
+		RegionStart: &startCopy,
+		RegionEnd:   &endCopy,
+	})
 }
 
 func (e *Engine) enqueueCapture(ctx context.Context, captureEvent CaptureEvent) error {
@@ -346,19 +363,36 @@ func (e *Engine) handleCaptureEvent(ctx context.Context, event CaptureEvent) {
 		e.fail(runCtx, target, fmt.Errorf("workflow is not fully initialized"), noReplyMessageID)
 		return
 	}
-	image, err := capture.Screenshot()
+	var imageData []byte
+	var err error
+	if event.RegionStart != nil || event.RegionEnd != nil {
+		if event.RegionStart == nil || event.RegionEnd == nil {
+			e.fail(ctx, target, fmt.Errorf("region screenshot requires both a start point and an end point"), noReplyMessageID)
+			return
+		}
+		regionCapture, ok := capture.(interface {
+			ScreenshotRegion(start, end image.Point) ([]byte, error)
+		})
+		if !ok {
+			e.fail(ctx, target, fmt.Errorf("workflow capture does not support region screenshots"), noReplyMessageID)
+			return
+		}
+		imageData, err = regionCapture.ScreenshotRegion(*event.RegionStart, *event.RegionEnd)
+	} else {
+		imageData, err = capture.Screenshot()
+	}
 	if err != nil {
 		e.fail(ctx, target, fmt.Errorf("capture screenshot: %w", err), noReplyMessageID)
 		slog.Error("screenshot failed", "source", source, "error", err)
 		return
 	}
-	slog.Info("screenshot captured", "source", source, "bytes", len(image))
+	slog.Info("screenshot captured", "source", source, "bytes", len(imageData))
 	var screenshotMessageID int
 	var screenshotWarning error
 	if sendImage {
 		// Deliver the screenshot as soon as capture succeeds. The LLM request
 		// happens afterwards, so Telegram receives visual feedback immediately.
-		screenshotMessageID, err = e.sender.SendPhoto(runCtx, target, image, screenshotCaption)
+		screenshotMessageID, err = e.sender.SendPhoto(runCtx, target, imageData, screenshotCaption)
 		if err != nil {
 			screenshotWarning = fmt.Errorf("send screenshot: %w", err)
 			e.setLastWarning(screenshotWarning)
@@ -369,7 +403,7 @@ func (e *Engine) handleCaptureEvent(ctx context.Context, event CaptureEvent) {
 		}
 	}
 	result, err := backend.Analyze(runCtx, analyzer.Request{
-		Image: image, MIMEType: captureMIMEType(capture), Prompt: prompt, Source: source,
+		Image: imageData, MIMEType: captureMIMEType(capture), Prompt: prompt, Source: source,
 	})
 	if err != nil {
 		// Keep the parent workflow context for error delivery. runCtx is

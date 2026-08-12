@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"image"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -95,13 +96,65 @@ func main() {
 		os.Exit(1)
 	}
 	if cfg.Hotkey.Enabled {
-		if _, err := hotkey.New(cfg.Hotkey.Capture); err != nil {
+		if _, err := hotkey.NewBindings(configuredHotkeyBindings(cfg.Hotkey)); err != nil {
 			logger.Error("configure hotkey", "error", err)
 			os.Exit(1)
 		}
 	}
 
 	var engine *workflow.Engine
+	var regionMu sync.RWMutex
+	var regionStart, regionEnd *image.Point
+	setRegionStart := func(x, y int) {
+		point := image.Point{X: x, Y: y}
+		regionMu.Lock()
+		regionStart = &point
+		regionMu.Unlock()
+		logger.Info("region screenshot start point updated", "x", x, "y", y)
+	}
+	setRegionEnd := func(x, y int) {
+		point := image.Point{X: x, Y: y}
+		regionMu.Lock()
+		regionEnd = &point
+		regionMu.Unlock()
+		logger.Info("region screenshot end point updated", "x", x, "y", y)
+	}
+	queueRegionCapture := func() {
+		regionMu.RLock()
+		start, end := regionStart, regionEnd
+		if start != nil {
+			startCopy := *start
+			start = &startCopy
+		}
+		if end != nil {
+			endCopy := *end
+			end = &endCopy
+		}
+		regionMu.RUnlock()
+		if start == nil || end == nil {
+			logger.Warn("region capture skipped because both region points are not set")
+			return
+		}
+		if err := engine.CaptureFromRegion(ctx, "", workflow.CaptureSourceRegion, *start, *end); err != nil {
+			logger.Warn("queue region capture", "error", err)
+		}
+	}
+	buildHotkeyBindings := func(hotkeys config.HotkeyConfig) []hotkey.Binding {
+		return []hotkey.Binding{
+			{Combination: hotkeys.Capture, OnPress: func(int, int) {
+				logger.Info("capture hotkey pressed")
+				if err := engine.CaptureFrom(ctx, "", workflow.CaptureSourceHotkey); err != nil {
+					logger.Warn("queue hotkey capture", "error", err)
+				}
+			}},
+			{Combination: hotkeys.RegionStart, OnPress: setRegionStart},
+			{Combination: hotkeys.RegionEnd, OnPress: setRegionEnd},
+			{Combination: hotkeys.RegionCapture, OnPress: func(int, int) {
+				logger.Info("region capture hotkey pressed")
+				queueRegionCapture()
+			}},
+		}
+	}
 	var currentConfig = cfg
 	var currentConfigMu sync.RWMutex
 	var reloadMu sync.Mutex
@@ -162,14 +215,13 @@ func main() {
 			logger.Error("configuration reload failed", "stage", "initialize", "error", err)
 			return err
 		}
-		hotkeyChanged := next.Hotkey.Enabled != previous.Hotkey.Enabled || next.Hotkey.Capture != previous.Hotkey.Capture
+		hotkeyChanged := next.Hotkey.Enabled != previous.Hotkey.Enabled ||
+			next.Hotkey.Capture != previous.Hotkey.Capture ||
+			next.Hotkey.RegionStart != previous.Hotkey.RegionStart ||
+			next.Hotkey.RegionEnd != previous.Hotkey.RegionEnd ||
+			next.Hotkey.RegionCapture != previous.Hotkey.RegionCapture
 		if hotkeyChanged {
-			if err := hotkeyManager.Start(next.Hotkey.Enabled, next.Hotkey.Capture, func() {
-				logger.Info("capture hotkey pressed")
-				if err := engine.CaptureFrom(ctx, "", workflow.CaptureSourceHotkey); err != nil {
-					logger.Warn("queue hotkey capture", "error", err)
-				}
-			}); err != nil {
+			if err := hotkeyManager.StartBindings(next.Hotkey.Enabled, buildHotkeyBindings(next.Hotkey)); err != nil {
 				logger.Error("configuration reload failed", "stage", "hotkey", "error", err)
 				return err
 			}
@@ -233,12 +285,7 @@ func main() {
 		cancel()
 	}()
 
-	if err := hotkeyManager.Start(cfg.Hotkey.Enabled, cfg.Hotkey.Capture, func() {
-		logger.Info("capture hotkey pressed")
-		if err := engine.CaptureFrom(ctx, "", workflow.CaptureSourceHotkey); err != nil {
-			logger.Warn("queue hotkey capture", "error", err)
-		}
-	}); err != nil {
+	if err := hotkeyManager.StartBindings(cfg.Hotkey.Enabled, buildHotkeyBindings(cfg.Hotkey)); err != nil {
 		logger.Error("configure hotkey", "error", err)
 		cancel()
 	}
@@ -550,4 +597,13 @@ func sameUserIDs(left, right []int64) bool {
 		}
 	}
 	return true
+}
+
+func configuredHotkeyBindings(h config.HotkeyConfig) []hotkey.Binding {
+	return []hotkey.Binding{
+		{Combination: h.Capture},
+		{Combination: h.RegionStart},
+		{Combination: h.RegionEnd},
+		{Combination: h.RegionCapture},
+	}
 }

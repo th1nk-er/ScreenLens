@@ -31,6 +31,25 @@ func (m *Manager) Start(enabled bool, combination string, onCapture func()) erro
 	if err != nil {
 		return err
 	}
+	return m.startListener(listener, onCapture)
+}
+
+// StartBindings starts one shared global listener for all configured
+// shortcuts. Sharing the hook is important because gohook owns process-wide
+// listener state.
+func (m *Manager) StartBindings(enabled bool, bindings []Binding) error {
+	if !enabled {
+		m.Stop()
+		return nil
+	}
+	listener, err := NewBindings(bindings)
+	if err != nil {
+		return err
+	}
+	return m.startListener(listener, nil)
+}
+
+func (m *Manager) startListener(listener *Listener, onCapture func()) error {
 	m.Stop()
 
 	ctx, cancel := context.WithCancel(m.parent)

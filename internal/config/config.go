@@ -50,9 +50,12 @@ const (
 	DefaultTelegramTimeout        = "30s"
 	DefaultTelegramRequestTimeout = 30 * time.Second
 
-	DefaultAPIKeyPrefix = "Bearer"
-	DefaultAppName      = "ScreenLens"
-	DefaultHotkey       = "CTRL+SHIFT+S"
+	DefaultAPIKeyPrefix        = "Bearer"
+	DefaultAppName             = "ScreenLens"
+	DefaultHotkey              = "CTRL+SHIFT+S"
+	DefaultRegionStartHotkey   = "ALT+SHIFT+S"
+	DefaultRegionEndHotkey     = "ALT+SHIFT+E"
+	DefaultRegionCaptureHotkey = "ALT+SHIFT+C"
 )
 
 const (
@@ -108,8 +111,11 @@ type AppConfig struct {
 }
 
 type HotkeyConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Capture string `yaml:"capture"`
+	Enabled       bool   `yaml:"enabled"`
+	Capture       string `yaml:"capture"`
+	RegionStart   string `yaml:"region_start"`
+	RegionEnd     string `yaml:"region_end"`
+	RegionCapture string `yaml:"region_capture"`
 }
 
 type CaptureConfig struct {
@@ -231,8 +237,11 @@ func Defaults() Config {
 	return Config{
 		App: AppConfig{Name: DefaultAppName},
 		Hotkey: HotkeyConfig{
-			Enabled: true,
-			Capture: DefaultHotkey,
+			Enabled:       true,
+			Capture:       DefaultHotkey,
+			RegionStart:   DefaultRegionStartHotkey,
+			RegionEnd:     DefaultRegionEndHotkey,
+			RegionCapture: DefaultRegionCaptureHotkey,
 		},
 		Capture: CaptureConfig{
 			Monitor:   MonitorPrimary,
@@ -313,6 +322,22 @@ func (c *Config) NormalizeAndValidate() error {
 	c.App.LogFile = strings.TrimSpace(c.App.LogFile)
 	if c.App.Name == "" {
 		c.App.Name = DefaultAppName
+	}
+	c.Hotkey.Capture = strings.TrimSpace(c.Hotkey.Capture)
+	if c.Hotkey.Capture == "" {
+		c.Hotkey.Capture = DefaultHotkey
+	}
+	c.Hotkey.RegionStart = strings.TrimSpace(c.Hotkey.RegionStart)
+	if c.Hotkey.RegionStart == "" {
+		c.Hotkey.RegionStart = DefaultRegionStartHotkey
+	}
+	c.Hotkey.RegionEnd = strings.TrimSpace(c.Hotkey.RegionEnd)
+	if c.Hotkey.RegionEnd == "" {
+		c.Hotkey.RegionEnd = DefaultRegionEndHotkey
+	}
+	c.Hotkey.RegionCapture = strings.TrimSpace(c.Hotkey.RegionCapture)
+	if c.Hotkey.RegionCapture == "" {
+		c.Hotkey.RegionCapture = DefaultRegionCaptureHotkey
 	}
 
 	c.Capture.Monitor = strings.TrimSpace(strings.ToLower(c.Capture.Monitor))

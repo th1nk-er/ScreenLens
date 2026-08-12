@@ -27,6 +27,12 @@ type Capture interface {
 	Screenshot() ([]byte, error)
 }
 
+// RegionCapture is implemented by capturers that can capture an arbitrary
+// desktop rectangle without showing a selection overlay.
+type RegionCapture interface {
+	ScreenshotRegion(start, end image.Point) ([]byte, error)
+}
+
 type Capturer struct {
 	displayIndex int
 	format       string
@@ -87,6 +93,31 @@ func (c *Capturer) Screenshot() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("capture display %d: %w", c.displayIndex, err)
 	}
+	return c.encodeWithLimits(imageData)
+}
+
+// ScreenshotRegion captures the rectangle formed by start and end. image.Rect
+// normalizes either point order, so callers can use any two corners.
+func (c *Capturer) ScreenshotRegion(start, end image.Point) ([]byte, error) {
+	rect := regionRectangle(start, end)
+	if rect.Dx() < minimumImageSize || rect.Dy() < minimumImageSize {
+		return nil, fmt.Errorf("region screenshot requires two distinct points")
+	}
+	imageData, err := kscreenshot.CaptureRect(rect)
+	if err != nil {
+		return nil, fmt.Errorf("capture screenshot region %v: %w", rect, err)
+	}
+	return c.encodeWithLimits(imageData)
+}
+
+func regionRectangle(start, end image.Point) image.Rectangle {
+	return image.Rectangle{
+		Min: image.Point{X: min(start.X, end.X), Y: min(start.Y, end.Y)},
+		Max: image.Point{X: max(start.X, end.X), Y: max(start.Y, end.Y)},
+	}
+}
+
+func (c *Capturer) encodeWithLimits(imageData image.Image) ([]byte, error) {
 	var source image.Image = resizeToFit(imageData, c.maxWidth, c.maxHeight)
 	quality := c.quality
 	for {

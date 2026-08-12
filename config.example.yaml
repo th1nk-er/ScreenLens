@@ -8,6 +8,10 @@ hotkey:
   # Keyboard example: CTRL+SHIFT+S
   # Mouse side buttons: MOUSE_X1 / MOUSE_X2
   capture: CTRL+SHIFT+S
+  # Region screenshots remember the last point set by each shortcut.
+  region_start: ALT+SHIFT+S
+  region_end: ALT+SHIFT+E
+  region_capture: ALT+SHIFT+C
 
 capture:
   monitor: primary
