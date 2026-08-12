@@ -13,23 +13,6 @@ import (
 
 const parserLineLimit = 4 << 20
 
-func parseOutput(provider string, data []byte) (analyzer.Result, error) {
-	switch provider {
-	case "codex":
-		return parseCodex(data)
-	case "claude":
-		return parseClaude(data)
-	case "opencode":
-		return parseOpenCode(data)
-	default:
-		text := strings.TrimSpace(string(data))
-		if text == "" {
-			return analyzer.Result{}, errors.New("local agent returned an empty result")
-		}
-		return analyzer.Result{Text: text}, nil
-	}
-}
-
 func parseCodex(data []byte) (analyzer.Result, error) {
 	result := analyzer.Result{Provider: "codex"}
 	var messages []string

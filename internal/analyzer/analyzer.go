@@ -13,10 +13,13 @@ import (
 // a file path (local CLI agents) are responsible for staging and cleaning up
 // their own temporary artifact.
 type Request struct {
-	Image    []byte
-	MIMEType string
-	Prompt   string
-	Source   string
+	Image          []byte
+	MIMEType       string
+	Prompt         string
+	Source         string
+	PreviousOutput string
+	StepIndex      int
+	StepName       string
 }
 
 // Result contains the user-facing answer and provider metadata useful for
@@ -28,6 +31,10 @@ type Result struct {
 	RunID     string
 	ExitCode  int
 	Duration  time.Duration
+	Workflow  string
+	StepIndex int
+	StepName  string
+	StepCount int
 }
 
 // Analyzer is the stable application boundary between the workflow and any

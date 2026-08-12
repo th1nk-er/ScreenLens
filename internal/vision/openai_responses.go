@@ -16,11 +16,8 @@ func (c *openAIResponsesClient) Analyze(ctx context.Context, image []byte, promp
 		"model": c.model,
 		"input": []any{
 			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{"type": "input_text", "text": prompt},
-					map[string]any{"type": "input_image", "image_url": c.imageData(image), "detail": "auto"},
-				},
+				"role":    "user",
+				"content": responsesContent(prompt, image, c.imageData),
 			},
 		},
 	}
@@ -61,4 +58,12 @@ func (c *openAIResponsesClient) Analyze(ctx context.Context, image []byte, promp
 		return "", fmt.Errorf("OpenAI Responses response contains no text")
 	}
 	return strings.TrimSpace(text.String()), nil
+}
+
+func responsesContent(prompt string, image []byte, imageData func([]byte) string) []any {
+	content := []any{map[string]any{"type": "input_text", "text": prompt}}
+	if len(image) > 0 {
+		content = append(content, map[string]any{"type": "input_image", "image_url": imageData(image), "detail": "auto"})
+	}
+	return content
 }

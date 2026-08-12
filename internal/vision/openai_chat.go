@@ -16,11 +16,8 @@ func (c *openAIChatClient) Analyze(ctx context.Context, image []byte, prompt str
 		"model": c.model,
 		"messages": []any{
 			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{"type": "text", "text": prompt},
-					map[string]any{"type": "image_url", "image_url": map[string]any{"url": c.imageData(image)}},
-				},
+				"role":    "user",
+				"content": chatContent(prompt, image, c.imageData),
 			},
 		},
 	}
@@ -48,4 +45,12 @@ func (c *openAIChatClient) Analyze(ctx context.Context, image []byte, prompt str
 		return "", fmt.Errorf("OpenAI Chat Completions response contains no text")
 	}
 	return strings.TrimSpace(text), nil
+}
+
+func chatContent(prompt string, image []byte, imageData func([]byte) string) []any {
+	content := []any{map[string]any{"type": "text", "text": prompt}}
+	if len(image) > 0 {
+		content = append(content, map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageData(image)}})
+	}
+	return content
 }

@@ -142,7 +142,7 @@ func TestRegisterCommands(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatal(err)
 		}
-		if len(payload.Commands) != 6 || payload.Commands[0].Text != "screen" || payload.Commands[5].Text != "help" {
+		if len(payload.Commands) != 7 || payload.Commands[0].Text != "screen" || payload.Commands[6].Text != "help" {
 			t.Fatalf("commands = %+v", payload.Commands)
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -156,6 +156,18 @@ func TestRegisterCommands(t *testing.T) {
 	}
 	if err := registerCommands(bot); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestParseWorkflowPayload(t *testing.T) {
+	if got := parseWorkflowPayload("workflow: screen-solution"); got != "screen-solution" {
+		t.Fatalf("parseWorkflowPayload() = %q", got)
+	}
+	if got := parseWorkflowPayload("WORKFLOW=review"); got != "review" {
+		t.Fatalf("parseWorkflowPayload() = %q", got)
+	}
+	if got := parseWorkflowPayload("codex"); got != "" {
+		t.Fatalf("profile payload was parsed as workflow: %q", got)
 	}
 }
 

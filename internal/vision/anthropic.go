@@ -22,22 +22,23 @@ func (c *anthropicClient) Analyze(ctx context.Context, image []byte, prompt stri
 	if encodedSize := base64.StdEncoding.EncodedLen(len(image)); encodedSize > anthropicMaxBase64ImageBytes {
 		return "", fmt.Errorf("Anthropic image exceeds the 10 MB base64 limit (%d bytes)", anthropicMaxBase64ImageBytes)
 	}
+	content := []any{map[string]any{"type": "text", "text": prompt}}
+	if len(image) > 0 {
+		content = []any{map[string]any{
+			"type": "image",
+			"source": map[string]any{
+				"type":       "base64",
+				"media_type": c.imageMIME,
+				"data":       base64.StdEncoding.EncodeToString(image),
+			},
+		}, map[string]any{"type": "text", "text": prompt}}
+	}
 	payload := map[string]any{
 		"model": c.model,
 		"messages": []any{
 			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{
-						"type": "image",
-						"source": map[string]any{
-							"type":       "base64",
-							"media_type": c.imageMIME,
-							"data":       base64.StdEncoding.EncodeToString(image),
-						},
-					},
-					map[string]any{"type": "text", "text": prompt},
-				},
+				"role":    "user",
+				"content": content,
 			},
 		},
 	}

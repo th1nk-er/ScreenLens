@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -64,9 +65,16 @@ const (
 	LocalAgentProviderAuto = "auto"
 	LocalAgentTransportCLI = "cli"
 	LocalAgentWorkDirTemp  = "temp"
+	LocalAgentImageAuto    = "auto"
+	LocalAgentImagePath    = "path"
+	LocalAgentImageNative  = "native"
 
 	LocalAgentSessionEphemeral  = "ephemeral"
 	LocalAgentSessionPersistent = "persistent"
+
+	WorkflowInputBoth       = "both"
+	WorkflowInputScreenshot = "screenshot"
+	WorkflowInputPrevious   = "previous"
 )
 
 const (
@@ -114,15 +122,38 @@ type CaptureConfig struct {
 }
 
 // AnalysisConfig owns the common analysis contract: the active mode/profile,
-// the single configured prompt, execution limits, and all backend profiles.
+// optional legacy prompt, execution limits, workflow registry, and backend
+// profiles.
 type AnalysisConfig struct {
-	Mode           string                     `yaml:"mode"`
-	Profile        string                     `yaml:"profile"`
-	Prompt         string                     `yaml:"prompt"`
-	Timeout        string                     `yaml:"timeout"`
-	MaxOutputBytes int                        `yaml:"max_output_bytes"`
-	Session        string                     `yaml:"session"`
-	Profiles       map[string]AnalysisProfile `yaml:"profiles"`
+	Mode           string                      `yaml:"mode"`
+	Profile        string                      `yaml:"profile"`
+	AutoProfiles   []string                    `yaml:"auto_profiles"`
+	Prompt         string                      `yaml:"prompt"`
+	Workflow       string                      `yaml:"workflow"`
+	Workflows      map[string]AnalysisWorkflow `yaml:"workflows"`
+	Timeout        string                      `yaml:"timeout"`
+	MaxOutputBytes int                         `yaml:"max_output_bytes"`
+	Session        string                      `yaml:"session"`
+	Profiles       map[string]AnalysisProfile  `yaml:"profiles"`
+}
+
+// AnalysisWorkflow is an ordered chain of analysis steps. Each step can use a
+// named profile from AnalysisConfig.Profiles or define an isolated inline
+// profile through ProfileConfig.
+type AnalysisWorkflow struct {
+	Steps   []AnalysisStep `yaml:"steps"`
+	Timeout string         `yaml:"timeout"`
+}
+
+// AnalysisStep is deliberately small: orchestration concerns live here while
+// provider-specific settings stay in AnalysisProfile. A step must set exactly
+// one of Profile and ProfileConfig.
+type AnalysisStep struct {
+	Name          string           `yaml:"name"`
+	Profile       string           `yaml:"profile"`
+	ProfileConfig *AnalysisProfile `yaml:"profile_config"`
+	Prompt        string           `yaml:"prompt"`
+	Input         string           `yaml:"input"`
 }
 
 // AnalysisProfile keeps provider-specific fields isolated while sharing the
@@ -156,6 +187,7 @@ type VisionConfig struct {
 type LocalAgentProfile struct {
 	Provider        string            `yaml:"provider"`
 	Transport       string            `yaml:"transport"`
+	ImageTransport  string            `yaml:"image_transport"`
 	Command         string            `yaml:"command"`
 	Args            []string          `yaml:"args"`
 	WorkDir         string            `yaml:"work_dir"`
@@ -213,6 +245,7 @@ func Defaults() Config {
 		Analysis: AnalysisConfig{
 			Mode:           AnalysisModeLocalAgent,
 			Profile:        LocalAgentProviderAuto,
+			AutoProfiles:   DefaultAutoProfiles(),
 			Timeout:        DefaultAgentTimeout,
 			MaxOutputBytes: DefaultAgentMaxOutputBytes,
 			Session:        LocalAgentSessionEphemeral,
@@ -242,6 +275,12 @@ func Defaults() Config {
 			SendImage:   true,
 		},
 	}
+}
+
+// DefaultAutoProfiles is the backwards-compatible provider discovery order.
+// Users can override it with analysis.auto_profiles without changing code.
+func DefaultAutoProfiles() []string {
+	return []string{"codex", "claude", "opencode"}
 }
 
 func Load(path string) (Config, error) {
@@ -323,6 +362,9 @@ func (c *Config) NormalizeAndValidate() error {
 	if err := c.normalizeAnalysisProfiles(); err != nil {
 		return err
 	}
+	if err := c.normalizeAnalysisWorkflows(); err != nil {
+		return err
+	}
 
 	c.Telegram.Token = strings.TrimSpace(c.Telegram.Token)
 	c.Telegram.ChatID = strings.TrimSpace(c.Telegram.ChatID)
@@ -380,8 +422,23 @@ func (c *Config) normalizeAnalysis() error {
 	if c.Analysis.Mode == AnalysisModeVision && c.Analysis.Profile == "" {
 		c.Analysis.Profile = "vision"
 	}
+	if len(c.Analysis.AutoProfiles) == 0 {
+		c.Analysis.AutoProfiles = DefaultAutoProfiles()
+	}
+	seenAutoProfiles := make(map[string]struct{}, len(c.Analysis.AutoProfiles))
+	for index, profile := range c.Analysis.AutoProfiles {
+		profile = strings.ToLower(strings.TrimSpace(profile))
+		if profile == "" {
+			return fmt.Errorf("analysis.auto_profiles[%d] must not be empty", index)
+		}
+		if _, exists := seenAutoProfiles[profile]; exists {
+			return fmt.Errorf("analysis.auto_profiles contains duplicate profile %q", profile)
+		}
+		seenAutoProfiles[profile] = struct{}{}
+		c.Analysis.AutoProfiles[index] = profile
+	}
 	c.Analysis.Prompt = strings.TrimSpace(c.Analysis.Prompt)
-	if c.Analysis.Prompt == "" {
+	if c.Analysis.Prompt == "" && len(c.Analysis.Workflows) == 0 {
 		return errors.New("analysis.prompt is required; configure it in the YAML file")
 	}
 	if c.Analysis.Timeout == "" {
@@ -408,7 +465,13 @@ func (c *Config) normalizeAnalysis() error {
 
 func (c *Config) normalizeAnalysisProfiles() error {
 	if len(c.Analysis.Profiles) == 0 {
-		return errors.New("analysis.profiles must contain at least one profile")
+		if len(c.Analysis.Workflows) == 0 {
+			return errors.New("analysis.profiles must contain at least one profile")
+		}
+		// A workflow may define every backend through step.profile_config.
+		// normalizeAnalysisWorkflows validates named references after this
+		// function returns, so an empty registry is valid in that case.
+		return nil
 	}
 	normalized := make(map[string]AnalysisProfile, len(c.Analysis.Profiles))
 	for rawName, profile := range c.Analysis.Profiles {
@@ -435,17 +498,134 @@ func (c *Config) normalizeAnalysisProfiles() error {
 		normalized[name] = profile
 	}
 	c.Analysis.Profiles = normalized
-	if c.Analysis.Mode == AnalysisModeVision {
+	if len(c.Analysis.Workflows) == 0 && c.Analysis.Mode == AnalysisModeVision {
 		profile, ok := c.Analysis.Profiles[c.Analysis.Profile]
 		if !ok || profile.Type != AnalysisProfileTypeVisionAPI {
 			return fmt.Errorf("analysis.profile %q must reference a vision-api profile", c.Analysis.Profile)
 		}
 	}
-	if c.Analysis.Mode == AnalysisModeLocalAgent && c.Analysis.Profile != LocalAgentProviderAuto {
+	if len(c.Analysis.Workflows) == 0 && c.Analysis.Mode == AnalysisModeLocalAgent && c.Analysis.Profile != LocalAgentProviderAuto {
 		profile, ok := c.Analysis.Profiles[c.Analysis.Profile]
 		if !ok || profile.Type != AnalysisProfileTypeLocalAgent {
 			return fmt.Errorf("analysis.profile %q must reference a local-agent profile", c.Analysis.Profile)
 		}
+	}
+	return nil
+}
+
+func (c *Config) normalizeAnalysisWorkflows() error {
+	if len(c.Analysis.Workflows) == 0 {
+		c.Analysis.Workflow = strings.ToLower(strings.TrimSpace(c.Analysis.Workflow))
+		return nil
+	}
+
+	normalized := make(map[string]AnalysisWorkflow, len(c.Analysis.Workflows))
+	for rawName, workflow := range c.Analysis.Workflows {
+		name := strings.ToLower(strings.TrimSpace(rawName))
+		if name == "" {
+			return errors.New("analysis.workflows must not contain an empty workflow name")
+		}
+		if _, exists := normalized[name]; exists {
+			return fmt.Errorf("analysis.workflows contains duplicate workflow name %q", name)
+		}
+		if len(workflow.Steps) == 0 {
+			return fmt.Errorf("analysis.workflows.%s.steps must contain at least one step", name)
+		}
+		stepNames := make(map[string]struct{}, len(workflow.Steps))
+		if workflow.Timeout != "" {
+			timeout, err := time.ParseDuration(workflow.Timeout)
+			if err != nil || timeout <= 0 {
+				return fmt.Errorf("analysis.workflows.%s.timeout must be a positive duration", name)
+			}
+		}
+		for index := range workflow.Steps {
+			if err := normalizeAnalysisStep(&workflow.Steps[index], name, index, c.Analysis); err != nil {
+				return err
+			}
+			if _, exists := stepNames[workflow.Steps[index].Name]; exists {
+				return fmt.Errorf("analysis.workflows.%s contains duplicate step name %q", name, workflow.Steps[index].Name)
+			}
+			stepNames[workflow.Steps[index].Name] = struct{}{}
+		}
+		normalized[name] = workflow
+	}
+	c.Analysis.Workflows = normalized
+
+	c.Analysis.Workflow = strings.ToLower(strings.TrimSpace(c.Analysis.Workflow))
+	if c.Analysis.Workflow == "" {
+		if _, ok := normalized["default"]; ok {
+			c.Analysis.Workflow = "default"
+		} else if len(normalized) == 1 {
+			for name := range normalized {
+				c.Analysis.Workflow = name
+			}
+		} else {
+			return errors.New("analysis.workflow is required when multiple workflows are configured")
+		}
+	}
+	if _, ok := normalized[c.Analysis.Workflow]; !ok {
+		return fmt.Errorf("analysis.workflow %q is not configured", c.Analysis.Workflow)
+	}
+	return nil
+}
+
+func normalizeAnalysisStep(step *AnalysisStep, workflowName string, index int, analysis AnalysisConfig) error {
+	path := fmt.Sprintf("analysis.workflows.%s.steps[%d]", workflowName, index)
+	step.Name = strings.TrimSpace(step.Name)
+	if step.Name == "" {
+		step.Name = fmt.Sprintf("step-%d", index+1)
+	}
+	step.Prompt = strings.TrimSpace(step.Prompt)
+	if step.Prompt == "" {
+		return fmt.Errorf("%s.prompt is required", path)
+	}
+	step.Input = strings.ToLower(strings.TrimSpace(step.Input))
+	if step.Input == "" {
+		step.Input = WorkflowInputBoth
+	}
+	switch step.Input {
+	case WorkflowInputBoth, WorkflowInputScreenshot:
+	case WorkflowInputPrevious:
+		if index == 0 {
+			return fmt.Errorf("%s.input cannot be previous on the first step", path)
+		}
+	default:
+		return fmt.Errorf("%s.input must be %s, %s, or %s", path, WorkflowInputBoth, WorkflowInputScreenshot, WorkflowInputPrevious)
+	}
+	step.Profile = strings.ToLower(strings.TrimSpace(step.Profile))
+	if step.Profile != "" && step.ProfileConfig != nil {
+		return fmt.Errorf("%s must set only one of profile or profile_config", path)
+	}
+	if step.Profile == "" && step.ProfileConfig == nil {
+		return fmt.Errorf("%s must set profile or profile_config", path)
+	}
+	if step.ProfileConfig == nil {
+		if step.Profile == LocalAgentProviderAuto {
+			return nil
+		}
+		profile, ok := analysis.Profiles[step.Profile]
+		if !ok {
+			return fmt.Errorf("%s.profile %q is not configured", path, step.Profile)
+		}
+		if profile.Type != AnalysisProfileTypeLocalAgent && profile.Type != AnalysisProfileTypeVisionAPI {
+			return fmt.Errorf("%s.profile %q has unsupported type %q", path, step.Profile, profile.Type)
+		}
+		return nil
+	}
+
+	profile := step.ProfileConfig
+	profile.Type = strings.ToLower(strings.TrimSpace(profile.Type))
+	switch profile.Type {
+	case AnalysisProfileTypeVisionAPI:
+		if err := normalizeVisionProfile(&profile.Vision); err != nil {
+			return fmt.Errorf("%s.profile_config.vision: %w", path, err)
+		}
+	case AnalysisProfileTypeLocalAgent:
+		if err := normalizeLocalAgentProfile(&profile.LocalAgent, path+".profile_config", analysis); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("%s.profile_config.type must be %s or %s", path, AnalysisProfileTypeVisionAPI, AnalysisProfileTypeLocalAgent)
 	}
 	return nil
 }
@@ -503,6 +683,13 @@ func normalizeLocalAgentProfile(profile *LocalAgentProfile, name string, analysi
 	if profile.Transport != LocalAgentTransportCLI {
 		return fmt.Errorf("analysis.profiles.%s.local_agent.transport must be %s", name, LocalAgentTransportCLI)
 	}
+	profile.ImageTransport = strings.ToLower(strings.TrimSpace(profile.ImageTransport))
+	if profile.ImageTransport == "" {
+		profile.ImageTransport = LocalAgentImageAuto
+	}
+	if profile.ImageTransport != LocalAgentImageAuto && profile.ImageTransport != LocalAgentImagePath && profile.ImageTransport != LocalAgentImageNative {
+		return fmt.Errorf("analysis.profiles.%s.local_agent.image_transport must be %s, %s, or %s", name, LocalAgentImageAuto, LocalAgentImagePath, LocalAgentImageNative)
+	}
 	profile.Session = strings.ToLower(strings.TrimSpace(profile.Session))
 	if profile.Session == "" {
 		profile.Session = analysis.Session
@@ -548,6 +735,38 @@ func (c Config) LocalAgentProfiles() map[string]LocalAgentProfile {
 		}
 	}
 	return profiles
+}
+
+func (a AnalysisConfig) HasWorkflows() bool {
+	return len(a.Workflows) > 0
+}
+
+func (a AnalysisConfig) ActiveWorkflow() (AnalysisWorkflow, error) {
+	if len(a.Workflows) == 0 {
+		return AnalysisWorkflow{}, errors.New("analysis workflows are not configured")
+	}
+	name := strings.ToLower(strings.TrimSpace(a.Workflow))
+	workflow, ok := a.Workflows[name]
+	if !ok {
+		return AnalysisWorkflow{}, fmt.Errorf("analysis workflow %q is not configured", a.Workflow)
+	}
+	return workflow, nil
+}
+
+func (a AnalysisConfig) WorkflowNames() []string {
+	names := make([]string, 0, len(a.Workflows))
+	for name := range a.Workflows {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (a AnalysisConfig) WorkflowTimeout(workflow AnalysisWorkflow) time.Duration {
+	if workflow.Timeout != "" {
+		return parseTimeout(workflow.Timeout, parseTimeout(a.Timeout, 5*time.Minute))
+	}
+	return parseTimeout(a.Timeout, 5*time.Minute)
 }
 
 func NormalizeProtocol(protocol, provider string) string {

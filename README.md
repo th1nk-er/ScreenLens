@@ -23,10 +23,11 @@ hotkey / tray / Telegram
             v
       capture workflow
             |
-      analyzer boundary
+      analysis workflow
+       (ordered steps)
        +----+-----------+
        |                |
- local CLI agents   hosted vision API
+   step analyzer    step analyzer
        |                |
        +----+-----------+
             v
@@ -39,6 +40,7 @@ The main modules are deliberately separated:
 | --- | --- |
 | `internal/screenshot` | Capture, resize, encode, and size-limit screenshots |
 | `internal/workflow` | Serialize capture requests, cancellation, delivery, and status |
+| `internal/pipeline` | Execute named multi-step analysis workflows in order and pass prior text between steps |
 | `internal/analyzer` | Stable analyzer contract and hosted-API adapter |
 | `internal/agent` | Local CLI process execution, image staging, retries, sessions, and output parsing |
 | `internal/artifact` | Private temporary screenshot files and cleanup |
@@ -51,10 +53,12 @@ The main modules are deliberately separated:
 | --- | --- | --- | --- |
 | `codex` / Codex CLI | `codex exec --json` | Native `--image <path>` | Read-only sandbox; repository trust check is skipped for temporary artifacts |
 | `claude` / Claude Code | `claude -p ... --output-format json` | `@<path>` attachment, with restricted `Read` fallback | MCP is disabled; `Read` is the only allowed tool |
-| `opencode` / OpenCode | `opencode --pure run --format json` | Native `--file <path>` | External plugins and MCP are disabled; read-oriented permissions only |
+| `opencode` / OpenCode | `opencode --pure run --format json` | Native `--file <path>` | External plugins and MCP are disabled; native attachment plus read-only file access |
 | `vision` | Configured HTTP protocol | Base64 image payload | Opt-in hosted API mode |
 
 For local agents, ScreenLens stages the screenshot into a private temporary directory. The artifact is removed after the process finishes, including failure paths. The staged path is also exposed as `SCREENLENS_IMAGE_PATH` for custom wrappers.
+
+The built-in OpenCode adapter sends screenshots through OpenCode's native `--file` attachment and defaults to denying workspace-discovery tools while retaining read access for the attachment. This keeps a visual-recognition step focused on the image instead of searching the working directory for words from the prompt.
 
 The built-in arguments follow each tool's documented non-interactive CLI interface. See the official references for [Codex CLI](https://github.com/openai/codex), [Claude Code CLI](https://code.claude.com/docs/en/cli-usage), [Claude Code image workflows](https://code.claude.com/docs/en/common-workflows), and [OpenCode CLI](https://dev.opencode.ai/docs/cli/).
 
@@ -122,7 +126,7 @@ export TELEGRAM_CHAT_ID='<chat-id>'
 
 The example uses `analysis.mode: local-agent` and `analysis.profile: auto`. Auto selection checks Codex, Claude Code, then OpenCode. Set `analysis.profile` to a provider name for deterministic selection.
 
-`analysis.prompt` is required. There is no built-in prompt fallback; the prompt in YAML is the single source of truth for local agents and hosted APIs.
+`analysis.prompt` is required for legacy single-step mode. When multi-step workflows are configured, each step supplies its own prompt and the top-level prompt may be omitted.
 
 Start an extracted release binary:
 
@@ -148,7 +152,7 @@ When using the source tree directly, `go run ./cmd/screenlens -config config.yam
 
 ## Configuration
 
-The complete reference is [`config.example.yaml`](config.example.yaml). The format is intentionally strict: unknown YAML fields are rejected, prompts are only read from `analysis.prompt`, and the previous top-level `vision` configuration is not supported by this major version.
+The complete reference is [`config.example.yaml`](config.example.yaml). The format is intentionally strict: unknown YAML fields are rejected, and the previous top-level `vision` configuration is not supported by this major version.
 
 ```yaml
 analysis:
@@ -183,14 +187,62 @@ analysis:
         api_key: ${OPENAI_API_KEY}
 ```
 
+### Multi-step analysis workflows
+
+For a chain of models, configure `analysis.workflow` and one or more named entries under `analysis.workflows`. Steps run strictly in YAML order, and only the final step is sent as the user-facing answer. A step may reuse an existing `analysis.profiles.<name>` entry:
+
+```yaml
+analysis:
+  profiles:
+    deepseek:
+      type: local-agent
+      local_agent:
+        provider: deepseek
+        command: deepseek
+  workflow: screen-solution
+  workflows:
+    screen-solution:
+      timeout: 10m
+      steps:
+        - name: inspect
+          profile: codex
+          input: screenshot
+          prompt: Inspect the screenshot and list factual findings.
+        - name: reason
+          profile: deepseek
+          input: previous
+          prompt: Analyze the previous findings and identify likely causes.
+        - name: solution
+          profile: claude
+          input: previous
+          prompt: Turn the previous reasoning into a concrete solution.
+```
+
+It may also define a one-off profile directly on a step with `profile_config`, without adding it to the shared profile registry:
+
+```yaml
+- name: reason
+  profile_config:
+    type: local-agent
+    local_agent:
+      provider: deepseek
+      command: deepseek
+  input: previous
+  prompt: Analyze the previous findings.
+```
+
+`input` defaults to `both`. Use `screenshot` when a step should independently inspect the image, or `previous` when the model only supports text and should receive the prior step's output. In the latter mode the screenshot is omitted from CLI/API transport. `{previous_output}` can be placed explicitly in a prompt; otherwise ScreenLens appends a clearly marked previous-output section for steps after the first. `analysis.timeout` (or a workflow-specific `timeout`) bounds the complete chain; provider/profile timeouts still bound individual calls.
+
 ### Local-agent profiles
 
-`local_agent.command` is an executable name or path, not a shell command. `args` is an argument array, not a shell string. These placeholders are expanded per capture:
+`local_agent.command` is an executable name or path, not a shell command. `args` is an argument array, not a shell string. Empty `command` and `args` select the built-in adapter for the profile's `provider`; explicit values override the adapter's command construction. The adapter boundary owns provider-specific image transport, output parsing, safe defaults, and platform compatibility, while the core execution loop remains provider-neutral. These placeholders are expanded per capture:
 
 - `{prompt}` — configured prompt plus staged-image instructions.
 - `{image_path}` — private staged image path.
 - `{workdir}` — configured working directory, or the temporary artifact directory.
 - `{session_id}` — previous provider session ID for persistent sessions.
+
+`local_agent.image_transport` controls how a custom CLI receives the screenshot: `auto` uses the built-in adapter behavior, `path` adds the staged path to the prompt, and `native` suppresses the path fallback when custom `args` already attach `{image_path}` through the provider's native option. Built-in Codex, Claude, and OpenCode adapters keep their native attachment rules in the adapter registry.
 
 When overriding arguments, preserve the provider's image contract:
 
@@ -205,6 +257,8 @@ analysis:
 ```
 
 OpenCode's `--file` is an array option, so the prompt must appear before it. ScreenLens also repairs a missing Codex image value and appends the native image attachment when custom Codex arguments omit it.
+
+When `analysis.profile: auto` is used, `analysis.auto_profiles` controls discovery order. The default is `codex`, `claude`, then `opencode`; configure a different ordered list when the deployment has a preferred local backend.
 
 `max_output_tokens` is primarily useful for Claude Code and Anthropic-compatible gateways. It is exported as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` unless the profile already supplies that variable. This prevents a smaller third-party gateway from receiving an unnecessarily large output request.
 
@@ -222,7 +276,9 @@ YAML values support `${ENV_VAR}` expansion. Keep tokens and API keys in the envi
 - `MOUSE_X1` / `MOUSE_X2` — optional side-button capture aliases.
 - `/screen` — capture with the active profile.
 - `/screen codex` — use a profile for one capture.
+- `/screen workflow:screen-solution` — run a configured workflow for one capture.
 - `/agent` — list configured profiles.
+- `/workflow` — list configured workflows and the active workflow.
 - `/cancel` — cancel the active capture/analysis.
 - `/status` — show runtime and last-request status.
 - `/reload` — reload supported capture, analysis, and hotkey settings.

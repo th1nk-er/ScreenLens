@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +103,62 @@ func TestBuildAndAnalyzeCleansArtifact(t *testing.T) {
 	if imageIndex < 0 || imageIndex+1 >= len(runner.spec.Args) || !strings.Contains(runner.spec.Args[imageIndex+1], "screenshot.png") {
 		t.Fatalf("Codex image attachment is missing: %v", runner.spec.Args)
 	}
+	promptIndex := -1
+	for index, arg := range runner.spec.Args {
+		if strings.Contains(arg, "Read the image") {
+			promptIndex = index
+			break
+		}
+	}
+	if promptIndex < 0 || promptIndex >= imageIndex {
+		t.Fatalf("Codex prompt must precede the variadic image attachment: %v", runner.spec.Args)
+	}
+}
+
+func TestAnalyzeWithoutScreenshotUsesTextOnlyInvocation(t *testing.T) {
+	runner := &recordingRunner{stdout: `{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}`}
+	cli, _, err := buildWithRunner(configForTest(), nil, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := analyzerRequestForTest()
+	request.Image = nil
+	request.Prompt = "Answer based on the previous result."
+	if _, err := cli.Analyze(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	if containsArgument(runner.spec.Args, "--image") || runner.imagePath != "" {
+		t.Fatalf("text-only request unexpectedly included image: args=%v path=%q", runner.spec.Args, runner.imagePath)
+	}
+	if strings.Contains(strings.Join(runner.spec.Args, " "), "Read the image") {
+		t.Fatalf("text-only prompt references an image: %v", runner.spec.Args)
+	}
+}
+
+func TestNativeImageProvidersDoNotAddPathFallbackToPrompt(t *testing.T) {
+	for _, provider := range []string{"codex", "claude", "opencode"} {
+		t.Run(provider, func(t *testing.T) {
+			adapter := DefaultProviderRegistry().Lookup(provider)
+			prompt := adapter.PreparePrompt("Inspect the screenshot.", `C:\temp\screenshot.jpg`, `C:\temp`, config.LocalAgentImageAuto)
+			if strings.Contains(prompt, "The screenshot is available at this local path") {
+				t.Fatalf("provider %q received a path fallback prompt: %q", provider, prompt)
+			}
+		})
+	}
+}
+
+func TestUnknownImageProviderReceivesPathFallback(t *testing.T) {
+	prompt := genericAdapter{name: "custom"}.PreparePrompt("Inspect the screenshot.", `C:\temp\screenshot.jpg`, `C:\temp`, config.LocalAgentImageAuto)
+	if !strings.Contains(prompt, "The screenshot is available at this local path") {
+		t.Fatalf("custom provider did not receive a path fallback prompt: %q", prompt)
+	}
+}
+
+func TestCustomProviderCanDeclareNativeImageTransport(t *testing.T) {
+	prompt := genericAdapter{name: "custom"}.PreparePrompt("Inspect the screenshot.", `C:\temp\screenshot.jpg`, `C:\temp`, config.LocalAgentImageNative)
+	if strings.Contains(prompt, "The screenshot is available at this local path") {
+		t.Fatalf("native custom provider received a path fallback prompt: %q", prompt)
+	}
 }
 
 func TestInjectedProcessRunnerDoesNotRequireInstalledCLI(t *testing.T) {
@@ -109,6 +167,36 @@ func TestInjectedProcessRunnerDoesNotRequireInstalledCLI(t *testing.T) {
 	}
 	if !requiresCommandLookup(OSProcessRunner{}) {
 		t.Fatal("OS process runner must validate the provider executable")
+	}
+}
+
+func TestCustomProviderRegistryParticipatesInAutoDiscovery(t *testing.T) {
+	analysis := configForTest()
+	analysis.Profile = config.LocalAgentProviderAuto
+	analysis.AutoProfiles = []string{"custom-agent"}
+	registry := NewProviderRegistry(genericAdapter{name: "custom-agent"})
+	cli, info, err := buildWithRunnerAndRegistry(analysis, nil, &recordingRunner{stdout: "answer"}, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Provider != "custom-agent" || cli.provider != "custom-agent" {
+		t.Fatalf("provider info = %+v, cli provider = %q", info, cli.provider)
+	}
+}
+
+func TestBuildPrefersPowerShellCodexWrapperOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows command wrappers are only relevant on Windows")
+	}
+	if _, err := exec.LookPath("codex"); err != nil {
+		t.Skip("Codex CLI is not installed")
+	}
+	cli, info, err := buildWithRunner(configForTest(), nil, OSProcessRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cli.commandPrefix) == 0 || !strings.Contains(strings.ToLower(info.Command), "powershell") {
+		t.Fatalf("Codex command = %q, prefix = %v; want PowerShell wrapper", info.Command, cli.commandPrefix)
 	}
 }
 
@@ -194,6 +282,28 @@ func TestProcessFailureIncludesAvailableDiagnosticOutput(t *testing.T) {
 	}
 }
 
+func TestUnavailableModelIsPermanentAndDiagnosedBeforeContextMarkers(t *testing.T) {
+	err := errors.New(`{"api_error_status":404,"result":"The selected model may not exist or you may not have access to it.","usage":{"input_tokens":0}}`)
+	if retryableProviderError(err) {
+		t.Fatal("unavailable model error was marked retryable")
+	}
+	diagnosed := diagnoseProviderError("claude", err)
+	if !strings.Contains(diagnosed.Error(), "selected model is unavailable") {
+		t.Fatalf("diagnosed error = %v", diagnosed)
+	}
+	if strings.Contains(diagnosed.Error(), "context window") {
+		t.Fatalf("unavailable model was misdiagnosed as context error: %v", diagnosed)
+	}
+}
+
+func TestEndpointNotFoundIsNotDiagnosedAsUnavailableModel(t *testing.T) {
+	err := errors.New(`{"api_error_status":404,"result":"The endpoint was not found."}`)
+	diagnosed := diagnoseProviderError("claude", err)
+	if strings.Contains(diagnosed.Error(), "selected model is unavailable") {
+		t.Fatalf("endpoint error was misdiagnosed as model error: %v", diagnosed)
+	}
+}
+
 func TestOpenCodeReceivesScreenshotAsFileAttachment(t *testing.T) {
 	runner := &recordingRunner{stdout: `{"type":"text","part":{"text":"answer"}}`}
 	analysis := configForTest()
@@ -224,8 +334,35 @@ func TestOpenCodeReceivesScreenshotAsFileAttachment(t *testing.T) {
 	if !containsArgument(runner.spec.Args, "--pure") {
 		t.Fatalf("OpenCode pure mode is missing: %v", runner.spec.Args)
 	}
-	if !envContains(runner.spec.Env, `OPENCODE_PERMISSION={"*":"deny","read":"allow","glob":"allow","grep":"allow"}`) {
+	if !envContains(runner.spec.Env, `OPENCODE_PERMISSION={"*":"deny","read":"allow"}`) {
 		t.Fatalf("OpenCode permission policy is missing: %v", runner.spec.Env)
+	}
+	if envContains(runner.spec.Env, `OPENCODE_PERMISSION={"*":"deny","read":"allow","glob":"allow","grep":"allow"}`) {
+		t.Fatal("OpenCode workspace-discovery permissions must remain disabled by default")
+	}
+}
+
+func TestOpenCodeEnvironmentCanBeOverriddenByProfile(t *testing.T) {
+	runner := &recordingRunner{stdout: `{"type":"text","part":{"text":"answer"}}`}
+	analysis := configForTest()
+	analysis.Profile = "opencode"
+	cli, _, err := buildWithRunner(analysis, map[string]config.LocalAgentProfile{
+		"opencode": {
+			Provider: "opencode",
+			Command:  os.Args[0],
+			Env: map[string]string{
+				"OPENCODE_PERMISSION": "custom-policy",
+			},
+		},
+	}, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli.Analyze(context.Background(), analyzerRequestForTest()); err != nil {
+		t.Fatal(err)
+	}
+	if !envContains(runner.spec.Env, "OPENCODE_PERMISSION=custom-policy") {
+		t.Fatalf("configured OpenCode permission policy was not preserved: %v", runner.spec.Env)
 	}
 }
 
@@ -281,6 +418,16 @@ func TestCodexPersistentResumeReceivesScreenshotAsImageAttachment(t *testing.T) 
 	imageIndex := argumentIndex(runner.spec.Args, "--image")
 	if imageIndex < 0 || imageIndex+1 >= len(runner.spec.Args) || !strings.Contains(runner.spec.Args[imageIndex+1], "screenshot.png") {
 		t.Fatalf("Codex resume did not receive image attachment: %v", runner.spec.Args)
+	}
+	promptIndex := -1
+	for index, arg := range runner.spec.Args {
+		if strings.Contains(arg, "Read the image") {
+			promptIndex = index
+			break
+		}
+	}
+	if promptIndex < 0 || promptIndex >= imageIndex {
+		t.Fatalf("Codex resume prompt must precede the variadic image attachment: %v", runner.spec.Args)
 	}
 }
 
@@ -349,8 +496,10 @@ func (r *recordingRunner) Run(_ context.Context, spec ProcessSpec) (ProcessResul
 			r.imagePath = strings.TrimPrefix(value, "SCREENLENS_IMAGE_PATH=")
 		}
 	}
-	if _, err := os.Stat(r.imagePath); err != nil {
-		return ProcessResult{}, err
+	if r.imagePath != "" {
+		if _, err := os.Stat(r.imagePath); err != nil {
+			return ProcessResult{}, err
+		}
 	}
 	return ProcessResult{Stdout: []byte(r.stdout), ExitCode: 0}, nil
 }

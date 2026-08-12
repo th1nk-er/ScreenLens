@@ -23,6 +23,8 @@ analysis:
   # codex -> claude -> opencode; the first installed CLI wins.
   mode: local-agent
   profile: auto
+  # Override the discovery order without changing application code.
+  auto_profiles: [codex, claude, opencode]
   prompt: |
     Analyze the screenshot and answer in concise Markdown.
 
@@ -36,12 +38,51 @@ analysis:
   max_output_bytes: 2097152
   session: ephemeral
 
+  # Optional multi-step mode. Uncomment and edit the complete example below
+  # to run several LLMs in order. Select one workflow with analysis.workflow.
+  # Each step can reuse a named profile (for example codex or claude), or define
+  # an isolated profile_config directly on that step.
+  # The default input is both (screenshot + previous step output). Use
+  # input: screenshot when a step should inspect the image again, or
+  # input: previous for text-only models such as a reasoning/summarization API.
+  # Use {previous_output} when you want to control exactly where the prior
+  # result is inserted into the prompt.
+  # workflow: screen-solution
+  # workflows:
+  #   screen-solution:
+  #     timeout: 10m
+  #     steps:
+  #       - name: inspect
+  #         profile: codex
+  #         input: screenshot
+  #         prompt: |
+  #           Inspect the screenshot carefully. List facts, visible errors,
+  #           and uncertainties. Return findings for the next model.
+  #       - name: reason
+  #         # Reuse an existing named profile like this:
+  #         profile: deepseek
+  #         input: previous
+  #         prompt: |
+  #           Analyze the previous model's findings below. Identify likely causes,
+  #           alternatives, and the safest course of action.
+  #           Findings:
+  #           {previous_output}
+  #       - name: solution
+  #         profile: claude
+  #         input: previous
+  #         prompt: |
+  #           Summarize the findings and reasoning into a concise solution
+  #           with concrete next steps. Do not invent unavailable facts.
+
   # All analysis backends are maintained in this one profile registry.
   profiles:
     codex:
       type: local-agent
       local_agent:
         provider: codex
+        # auto uses the built-in adapter; custom providers may use path or
+        # native when their args explicitly transport {image_path}.
+        # image_transport: auto
         retry_count: 1
         # command: codex
         # {prompt}, {image_path}, {workdir}, and {session_id} are supported.
@@ -54,14 +95,37 @@ analysis:
         # Bounds Claude Code output for Anthropic-compatible gateways.
         max_output_tokens: 8192
         retry_count: 2
+        # If Claude CLI's global model is unavailable, override it explicitly.
+        # Replace <valid-model> with a model/alias available to your Claude CLI.
+        # args: [--model, "<valid-model>", -p, "{prompt}", --output-format, json, --no-session-persistence, --permission-mode, dontAsk, --tools, Read, --allowed-tools, Read, --strict-mcp-config]
 
     opencode:
       type: local-agent
       local_agent:
         provider: opencode
         retry_count: 1
+        # The built-in adapter attaches the image with --file and limits
+        # workspace-discovery tools during screenshot recognition.
         # If overriding args, keep {prompt} before --file because --file is an array option.
         # args: [--pure, run, --format, json, "{prompt}", --file, "{image_path}"]
+
+    # Uncomment this profile when the workflow uses: profile: deepseek
+    # deepseek:
+    #   type: local-agent
+    #   local_agent:
+    #     provider: deepseek
+    #     command: deepseek
+    #     image_transport: path
+
+  # Alternative: create a profile only for one workflow step. Replace the
+  # entire "reason" step in the workflow example above with this block.
+  # Do not configure both profile and profile_config on the same step:
+  #       - name: reason
+  #         profile_config:
+  #           type: local-agent
+  #           local_agent:
+  #             provider: deepseek
+  #             command: deepseek
 
     # Hosted Vision API is an alternative. Select it with:
     # analysis:

@@ -20,6 +20,7 @@ import (
 	"github.com/th1nk-er/ScreenLens/internal/hotkey"
 	"github.com/th1nk-er/ScreenLens/internal/instance"
 	"github.com/th1nk-er/ScreenLens/internal/logging"
+	"github.com/th1nk-er/ScreenLens/internal/pipeline"
 	"github.com/th1nk-er/ScreenLens/internal/screenshot"
 	"github.com/th1nk-er/ScreenLens/internal/telegram"
 	"github.com/th1nk-er/ScreenLens/internal/tray"
@@ -111,13 +112,29 @@ func main() {
 		profileName := strings.ToLower(strings.TrimSpace(profile))
 		if profileName == "vision" || (snapshot.Analysis.Profiles[profileName].Type == config.AnalysisProfileTypeVisionAPI) {
 			snapshot.Analysis.Profile = profileName
-			resolved, err := buildVisionAnalyzer(snapshot, capture.MIMEType())
+			resolved, err := buildVisionAnalyzer(snapshot, captureMIMEType(snapshot.Capture))
 			return resolved, profileName, err
+		}
+		if snapshot.Analysis.Prompt == "" && snapshot.Analysis.HasWorkflows() {
+			if active, workflowErr := snapshot.Analysis.ActiveWorkflow(); workflowErr == nil && len(active.Steps) > 0 {
+				snapshot.Analysis.Prompt = active.Steps[0].Prompt
+			}
 		}
 		snapshot.Analysis.Mode = config.AnalysisModeLocalAgent
 		snapshot.Analysis.Profile = profileName
 		resolved, name, err := buildLocalAnalyzer(snapshot)
 		return resolved, name, err
+	}
+	resolveWorkflow := func(name string) (analyzer.Analyzer, string, error) {
+		currentConfigMu.RLock()
+		snapshot := currentConfig
+		currentConfigMu.RUnlock()
+		workflowName := strings.ToLower(strings.TrimSpace(name))
+		if _, ok := snapshot.Analysis.Workflows[workflowName]; !ok {
+			return nil, "", fmt.Errorf("workflow %q is not configured", name)
+		}
+		snapshot.Analysis.Workflow = workflowName
+		return buildWorkflowAnalyzer(snapshot, captureMIMEType(snapshot.Capture))
 	}
 	hotkeyManager := hotkey.NewManager(ctx, func(err error) {
 		logger.Error("hotkey listener stopped", "error", err)
@@ -173,6 +190,9 @@ func main() {
 		OnScreenProfile: func(ctx context.Context, target, profile string) error {
 			return engine.CaptureFromProfile(ctx, target, workflow.CaptureSourceTelegram, profile)
 		},
+		OnScreenWorkflow: func(ctx context.Context, target, workflowName string) error {
+			return engine.CaptureFromWorkflow(ctx, target, workflow.CaptureSourceTelegram, workflowName)
+		},
 		OnReload: reload,
 		OnCancel: func(context.Context) bool { return engine.Cancel() },
 		Agents: func() string {
@@ -180,6 +200,12 @@ func main() {
 			snapshot := currentConfig
 			currentConfigMu.RUnlock()
 			return formatAgents(snapshot)
+		},
+		Workflows: func() string {
+			currentConfigMu.RLock()
+			snapshot := currentConfig
+			currentConfigMu.RUnlock()
+			return formatWorkflows(snapshot)
 		},
 		Status: func() string {
 			currentConfigMu.RLock()
@@ -194,6 +220,7 @@ func main() {
 	}
 
 	engine = workflow.NewAnalyzer(capture, backend, telegramBot, cfg.Analysis.Prompt, cfg.Telegram.SendImage, backendName, resolveProfile)
+	engine.SetWorkflowResolver(resolveWorkflow)
 	go func() {
 		if err := engine.Run(ctx); err != nil {
 			logger.Error("workflow stopped", "error", err)
@@ -248,11 +275,122 @@ func buildComponents(cfg config.Config) (*screenshot.Capturer, analyzer.Analyzer
 	if err != nil {
 		return nil, nil, "", fmt.Errorf("create screenshot capturer: %w", err)
 	}
-	backend, backendName, err := buildAnalyzer(cfg, capture.MIMEType())
+	backend, backendName, err := buildRuntimeAnalyzer(cfg, capture.MIMEType())
 	if err != nil {
 		return nil, nil, "", err
 	}
 	return capture, backend, backendName, nil
+}
+
+func captureMIMEType(cfg config.CaptureConfig) string {
+	if strings.EqualFold(strings.TrimSpace(cfg.Format), config.FormatPNG) {
+		return config.MIMETypePNG
+	}
+	return config.MIMETypeJPEG
+}
+
+func buildRuntimeAnalyzer(cfg config.Config, imageMIME string) (analyzer.Analyzer, string, error) {
+	if cfg.Analysis.HasWorkflows() {
+		return buildWorkflowAnalyzer(cfg, imageMIME)
+	}
+	return buildAnalyzer(cfg, imageMIME)
+}
+
+func buildWorkflowAnalyzer(cfg config.Config, imageMIME string) (analyzer.Analyzer, string, error) {
+	definition, err := cfg.Analysis.ActiveWorkflow()
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve active analysis workflow: %w", err)
+	}
+	steps := make([]pipeline.Step, 0, len(definition.Steps))
+	cache := make(map[string]analyzer.Analyzer)
+	for index, step := range definition.Steps {
+		cacheKey := ""
+		if step.ProfileConfig == nil && step.Profile != config.LocalAgentProviderAuto {
+			cacheKey = "profile:" + step.Profile
+			if cached, ok := cache[cacheKey]; ok {
+				steps = append(steps, pipeline.Step{Name: step.Name, Profile: step.Profile, Prompt: step.Prompt, Input: step.Input, Analyzer: cached})
+				continue
+			}
+		}
+		runtimeStep, cacheKey, err := buildWorkflowStep(cfg, step, index, imageMIME)
+		if err != nil {
+			return nil, "", err
+		}
+		if cacheKey != "" {
+			if cached, ok := cache[cacheKey]; ok {
+				runtimeStep.Analyzer = cached
+			} else {
+				cache[cacheKey] = runtimeStep.Analyzer
+			}
+		}
+		steps = append(steps, runtimeStep)
+	}
+	workflowTimeout := cfg.Analysis.WorkflowTimeout(definition)
+	runtime, err := pipeline.New(pipeline.Definition{
+		Name:    cfg.Analysis.Workflow,
+		Timeout: workflowTimeout,
+		Steps:   steps,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("create analysis workflow %q: %w", cfg.Analysis.Workflow, err)
+	}
+	return runtime, "workflow:" + cfg.Analysis.Workflow, nil
+}
+
+func buildWorkflowStep(cfg config.Config, step config.AnalysisStep, index int, imageMIME string) (pipeline.Step, string, error) {
+	profileName := step.Profile
+	var profile config.AnalysisProfile
+	cacheKey := ""
+	if step.ProfileConfig != nil {
+		profileName = fmt.Sprintf("%s-step-%d", cfg.Analysis.Workflow, index+1)
+		profile = *step.ProfileConfig
+	} else if step.Profile == config.LocalAgentProviderAuto {
+		profileName = config.LocalAgentProviderAuto
+		profile = config.AnalysisProfile{Type: config.AnalysisProfileTypeLocalAgent}
+	} else {
+		var ok bool
+		profile, ok = cfg.Analysis.Profiles[step.Profile]
+		if !ok {
+			return pipeline.Step{}, "", fmt.Errorf("workflow %q step %q references unknown profile %q", cfg.Analysis.Workflow, step.Name, step.Profile)
+		}
+		cacheKey = "profile:" + step.Profile
+	}
+
+	backend, _, err := buildProfileAnalyzer(cfg, profileName, profile, step.Prompt, imageMIME)
+	if err != nil {
+		return pipeline.Step{}, "", fmt.Errorf("create workflow %q step %q: %w", cfg.Analysis.Workflow, step.Name, err)
+	}
+	return pipeline.Step{Name: step.Name, Profile: profileName, Prompt: step.Prompt, Input: step.Input, Analyzer: backend}, cacheKey, nil
+}
+
+func buildProfileAnalyzer(cfg config.Config, profileName string, profile config.AnalysisProfile, prompt, imageMIME string) (analyzer.Analyzer, string, error) {
+	switch profile.Type {
+	case config.AnalysisProfileTypeVisionAPI:
+		visionClient, err := vision.New(profile.Vision, imageMIME)
+		if err != nil {
+			return nil, "", fmt.Errorf("create vision profile %q: %w", profileName, err)
+		}
+		return analyzer.NewVisionAdapter(visionClient, imageMIME), "vision", nil
+	case config.AnalysisProfileTypeLocalAgent:
+		analysis := cfg.Analysis
+		analysis.Mode = config.AnalysisModeLocalAgent
+		analysis.Profile = profileName
+		analysis.Prompt = prompt
+		profiles := cfg.LocalAgentProfiles()
+		if profileName == config.LocalAgentProviderAuto {
+			// agent.Build resolves auto against its built-in provider set and the
+			// configured local profiles.
+		} else if _, exists := profiles[profileName]; !exists {
+			profiles[profileName] = profile.LocalAgent
+		}
+		backend, info, err := agent.Build(analysis, profiles)
+		if err != nil {
+			return nil, "", fmt.Errorf("create local agent profile %q: %w", profileName, err)
+		}
+		return backend, info.Provider, nil
+	default:
+		return nil, "", fmt.Errorf("profile %q has unsupported type %q", profileName, profile.Type)
+	}
 }
 
 func buildAnalyzer(cfg config.Config, imageMIME string) (analyzer.Analyzer, string, error) {
@@ -296,7 +434,17 @@ func formatStatus(status workflow.Status, cfg config.Config) string {
 		"",
 		"- **State:** `" + state + "`",
 	}
-	if cfg.Analysis.Mode == config.AnalysisModeLocalAgent {
+	workflowStatus := status.Workflow != "" || strings.HasPrefix(status.Backend, "workflow:")
+	if cfg.Analysis.HasWorkflows() && workflowStatus {
+		workflowName := status.Workflow
+		if workflowName == "" {
+			workflowName = cfg.Analysis.Workflow
+		}
+		parts = append(parts, "- **Analysis workflow:** `"+workflowName+"`", "- **Steps:** `"+fmt.Sprintf("%d", len(cfg.Analysis.Workflows[workflowName].Steps))+"`")
+		if status.StepName != "" {
+			parts = append(parts, "- **Last step:** `"+status.StepName+"`")
+		}
+	} else if cfg.Analysis.Mode == config.AnalysisModeLocalAgent || isLocalAgentProfile(cfg, status.Profile) {
 		profile := status.Profile
 		if profile == "" {
 			profile = cfg.Analysis.Profile
@@ -330,6 +478,15 @@ func formatStatus(status workflow.Status, cfg config.Config) string {
 	return strings.Join(parts, "\n")
 }
 
+func isLocalAgentProfile(cfg config.Config, profileName string) bool {
+	profileName = strings.ToLower(strings.TrimSpace(profileName))
+	if profileName == "" {
+		return false
+	}
+	profile, ok := cfg.Analysis.Profiles[profileName]
+	return ok && profile.Type == config.AnalysisProfileTypeLocalAgent
+}
+
 func formatAgents(cfg config.Config) string {
 	parts := []string{"# Local agent profiles", "", "Use `/screen [profile]` to select one for a single capture."}
 	if cfg.Analysis.Mode == config.AnalysisModeLocalAgent {
@@ -351,6 +508,21 @@ func formatAgents(cfg config.Config) string {
 	}
 	for _, name := range names {
 		parts = append(parts, "- `"+name+"`")
+	}
+	return strings.Join(parts, "\n")
+}
+
+func formatWorkflows(cfg config.Config) string {
+	if !cfg.Analysis.HasWorkflows() {
+		return "# Analysis workflows\n\nNo multi-step workflows are configured."
+	}
+	parts := []string{"# Analysis workflows", "", "Use `/screen workflow:<name>` to run one for a single capture.", "", "- **Active:** `" + cfg.Analysis.Workflow + "`"}
+	for _, name := range cfg.Analysis.WorkflowNames() {
+		configured, ok := cfg.Analysis.Workflows[name]
+		if !ok {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("- `%s` (%d steps)", name, len(configured.Steps)))
 	}
 	return strings.Join(parts, "\n")
 }

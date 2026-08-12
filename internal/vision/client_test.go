@@ -122,6 +122,47 @@ func TestProtocolAdapters(t *testing.T) {
 	}
 }
 
+func TestProtocolAdaptersOmitImageForTextOnlyRequests(t *testing.T) {
+	protocols := []string{config.ProtocolOpenAIChat, config.ProtocolOpenAIResponses, config.ProtocolAnthropicMessages}
+	for _, protocol := range protocols {
+		t.Run(protocol, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Fatal(err)
+				}
+				var content []any
+				switch protocol {
+				case config.ProtocolOpenAIChat:
+					content = body["messages"].([]any)[0].(map[string]any)["content"].([]any)
+				case config.ProtocolOpenAIResponses:
+					content = body["input"].([]any)[0].(map[string]any)["content"].([]any)
+				case config.ProtocolAnthropicMessages:
+					content = body["messages"].([]any)[0].(map[string]any)["content"].([]any)
+				}
+				if len(content) != 1 || content[0].(map[string]any)["text"] == nil {
+					t.Fatalf("text-only content = %v", content)
+				}
+				if protocol == config.ProtocolOpenAIChat {
+					_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"text"}}]}`))
+				} else if protocol == config.ProtocolOpenAIResponses {
+					_, _ = w.Write([]byte(`{"output_text":"text"}`))
+				} else {
+					_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"text"}]}`))
+				}
+			}))
+			defer server.Close()
+			client, err := New(config.VisionConfig{Protocol: protocol, Endpoint: server.URL, Model: "model"}, "image/jpeg")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, err := client.Analyze(context.Background(), nil, "previous result"); err != nil || got != "text" {
+				t.Fatalf("Analyze() = %q, %v", got, err)
+			}
+		})
+	}
+}
+
 func TestVisionProxyConfigurationIsValidated(t *testing.T) {
 	cfg := config.VisionConfig{
 		Protocol: config.ProtocolOpenAIChat,

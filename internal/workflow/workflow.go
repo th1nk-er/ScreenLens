@@ -38,9 +38,10 @@ type Event struct {
 }
 
 type CaptureEvent struct {
-	Target  string
-	Source  string
-	Profile string
+	Target   string
+	Source   string
+	Profile  string
+	Workflow string
 }
 
 type Capture interface {
@@ -55,6 +56,11 @@ type Vision interface {
 // profile without making the workflow depend on a concrete provider package.
 type AnalyzerResolver func(profile string) (analyzer.Analyzer, string, error)
 
+// WorkflowResolver selects a fully constructed workflow for one capture. It
+// is kept separate from AnalyzerResolver so the legacy /screen [profile]
+// behavior remains unambiguous.
+type WorkflowResolver func(name string) (analyzer.Analyzer, string, error)
+
 type Sender interface {
 	SendText(ctx context.Context, target, text string) error
 	SendPhoto(ctx context.Context, target string, image []byte, caption string) (int, error)
@@ -62,15 +68,16 @@ type Sender interface {
 }
 
 type Engine struct {
-	mu        sync.RWMutex
-	capture   Capture
-	analyzer  analyzer.Analyzer
-	sender    Sender
-	prompt    string
-	sendImage bool
-	resolver  AnalyzerResolver
-	backend   string
-	cancel    context.CancelFunc
+	mu               sync.RWMutex
+	capture          Capture
+	analyzer         analyzer.Analyzer
+	sender           Sender
+	prompt           string
+	sendImage        bool
+	resolver         AnalyzerResolver
+	workflowResolver WorkflowResolver
+	backend          string
+	cancel           context.CancelFunc
 
 	events chan Event
 	busy   bool
@@ -87,6 +94,10 @@ type Status struct {
 	LastWarning  string
 	Backend      string
 	Profile      string
+	Workflow     string
+	StepIndex    int
+	StepName     string
+	StepCount    int
 	SessionID    string
 	ExitCode     int
 }
@@ -142,6 +153,14 @@ func (e *Engine) CaptureFrom(ctx context.Context, target, source string) error {
 }
 
 func (e *Engine) CaptureFromProfile(ctx context.Context, target, source, profile string) error {
+	return e.enqueueCapture(ctx, CaptureEvent{Target: target, Source: source, Profile: profile})
+}
+
+func (e *Engine) CaptureFromWorkflow(ctx context.Context, target, source, workflowName string) error {
+	return e.enqueueCapture(ctx, CaptureEvent{Target: target, Source: source, Workflow: workflowName})
+}
+
+func (e *Engine) enqueueCapture(ctx context.Context, captureEvent CaptureEvent) error {
 	e.mu.Lock()
 	if e.busy || e.queued {
 		e.mu.Unlock()
@@ -150,7 +169,7 @@ func (e *Engine) CaptureFromProfile(ctx context.Context, target, source, profile
 	e.queued = true
 	e.mu.Unlock()
 
-	err := e.Publish(ctx, Event{Name: CaptureRequest, Data: CaptureEvent{Target: target, Source: source, Profile: profile}})
+	err := e.Publish(ctx, Event{Name: CaptureRequest, Data: captureEvent})
 	if err != nil {
 		e.mu.Lock()
 		e.queued = false
@@ -193,7 +212,7 @@ func (e *Engine) Run(ctx context.Context) error {
 				if !ok {
 					captureEvent = CaptureEvent{}
 				}
-				e.handleCaptureProfile(ctx, captureEvent.Target, captureEvent.Source, captureEvent.Profile)
+				e.handleCaptureEvent(ctx, captureEvent)
 			}
 		}
 	}
@@ -214,6 +233,12 @@ func (e *Engine) ReplaceAnalyzer(capture Capture, backend analyzer.Analyzer, pro
 	e.resolver = resolver
 }
 
+func (e *Engine) SetWorkflowResolver(resolver WorkflowResolver) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.workflowResolver = resolver
+}
+
 func (e *Engine) Cancel() bool {
 	e.mu.RLock()
 	cancel := e.cancel
@@ -232,10 +257,15 @@ func (e *Engine) Status() Status {
 }
 
 func (e *Engine) handleCapture(ctx context.Context, target, source string) {
-	e.handleCaptureProfile(ctx, target, source, "")
+	e.handleCaptureEvent(ctx, CaptureEvent{Target: target, Source: source})
 }
 
 func (e *Engine) handleCaptureProfile(ctx context.Context, target, source, profile string) {
+	e.handleCaptureEvent(ctx, CaptureEvent{Target: target, Source: source, Profile: profile})
+}
+
+func (e *Engine) handleCaptureEvent(ctx context.Context, event CaptureEvent) {
+	target, source, profile, workflowName := event.Target, event.Source, event.Profile, event.Workflow
 	if source == "" {
 		source = defaultCaptureSource
 	}
@@ -255,7 +285,7 @@ func (e *Engine) handleCaptureProfile(ctx context.Context, target, source, profi
 	e.status.LastWarning = ""
 	e.status.SessionID = ""
 	e.status.Profile = profile
-	capture, backend, prompt, sendImage, resolver := e.capture, e.analyzer, e.prompt, e.sendImage, e.resolver
+	capture, backend, prompt, sendImage, resolver, workflowResolver := e.capture, e.analyzer, e.prompt, e.sendImage, e.resolver, e.workflowResolver
 	backendName := e.backend
 	e.mu.Unlock()
 	defer func() {
@@ -266,7 +296,18 @@ func (e *Engine) handleCaptureProfile(ctx context.Context, target, source, profi
 		e.status.LastDuration = time.Since(started)
 		e.mu.Unlock()
 	}()
-	if profile != "" {
+	if workflowName != "" {
+		if workflowResolver == nil {
+			e.fail(ctx, target, fmt.Errorf("analysis workflow %q is not available", workflowName), noReplyMessageID)
+			return
+		}
+		resolved, resolvedName, err := workflowResolver(workflowName)
+		if err != nil {
+			e.fail(ctx, target, fmt.Errorf("resolve analysis workflow %q: %w", workflowName, err), noReplyMessageID)
+			return
+		}
+		backend, backendName = resolved, resolvedName
+	} else if profile != "" {
 		if resolver == nil {
 			e.fail(ctx, target, fmt.Errorf("analysis profile %q is not available", profile), noReplyMessageID)
 			return
@@ -286,6 +327,13 @@ func (e *Engine) handleCaptureProfile(ctx context.Context, target, source, profi
 	e.cancel = cancel
 	e.status.Backend = backendName
 	e.status.Profile = profile
+	if workflowName == "" && strings.HasPrefix(backendName, "workflow:") {
+		workflowName = strings.TrimPrefix(backendName, "workflow:")
+	}
+	e.status.Workflow = workflowName
+	e.status.StepName = ""
+	e.status.StepIndex = 0
+	e.status.StepCount = 0
 	e.mu.Unlock()
 	defer func() {
 		cancel()
@@ -362,6 +410,14 @@ func (e *Engine) setAnalysisStatus(result analyzer.Result) {
 	if result.Provider != "" {
 		e.status.Backend = result.Provider
 	}
+	if result.Workflow != "" {
+		e.status.Workflow = result.Workflow
+	}
+	if result.StepCount > 0 {
+		e.status.StepIndex = result.StepIndex
+		e.status.StepName = result.StepName
+		e.status.StepCount = result.StepCount
+	}
 	e.status.SessionID = result.SessionID
 	e.status.ExitCode = result.ExitCode
 }
@@ -402,9 +458,9 @@ func (e *Engine) fail(ctx context.Context, target string, err error, replyTo int
 func normalizeAnalysisError(err error) error {
 	switch {
 	case errors.Is(err, context.Canceled):
-		return fmt.Errorf("local analysis canceled: %w", err)
+		return fmt.Errorf("analysis canceled: %w", err)
 	case errors.Is(err, context.DeadlineExceeded):
-		return fmt.Errorf("local analysis timed out: %w", err)
+		return fmt.Errorf("analysis timed out: %w", err)
 	default:
 		return err
 	}

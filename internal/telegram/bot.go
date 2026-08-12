@@ -18,13 +18,14 @@ import (
 )
 
 const (
-	commandScreen = "screen"
-	commandReload = "reload"
-	commandStatus = "status"
-	commandAgent  = "agent"
-	commandCancel = "cancel"
-	commandHelp   = "help"
-	statusRunning = "running"
+	commandScreen   = "screen"
+	commandReload   = "reload"
+	commandStatus   = "status"
+	commandAgent    = "agent"
+	commandWorkflow = "workflow"
+	commandCancel   = "cancel"
+	commandHelp     = "help"
+	statusRunning   = "running"
 )
 
 var errTelegramTargetEmpty = errors.New("Telegram target is empty")
@@ -36,13 +37,15 @@ type Sender interface {
 }
 
 type Handlers struct {
-	Context         context.Context
-	OnScreen        func(context.Context, string) error
-	OnScreenProfile func(context.Context, string, string) error
-	OnReload        func(context.Context) error
-	OnCancel        func(context.Context) bool
-	Agents          func() string
-	Status          func() string
+	Context          context.Context
+	OnScreen         func(context.Context, string) error
+	OnScreenProfile  func(context.Context, string, string) error
+	OnScreenWorkflow func(context.Context, string, string) error
+	OnReload         func(context.Context) error
+	OnCancel         func(context.Context) bool
+	Agents           func() string
+	Workflows        func() string
+	Status           func() string
 }
 
 type Bot struct {
@@ -97,6 +100,7 @@ func registerCommands(bot *tele.Bot) error {
 		{Text: commandReload, Description: "Reload capture and vision configuration"},
 		{Text: commandStatus, Description: "Show ScreenLens runtime status"},
 		{Text: commandAgent, Description: "List or select a local agent profile"},
+		{Text: commandWorkflow, Description: "List configured analysis workflows"},
 		{Text: commandCancel, Description: "Cancel the active capture"},
 		{Text: commandHelp, Description: "Show available commands"},
 	})
@@ -168,21 +172,32 @@ func (b *Bot) registerHandlers() {
 		}
 		target := c.Chat().Recipient()
 		profile := ""
+		workflowName := ""
 		if c.Message() != nil {
 			profile = strings.TrimSpace(c.Message().Payload)
+			workflowName = parseWorkflowPayload(profile)
+			if workflowName != "" {
+				profile = ""
+			}
 		}
 		message := "Capturing and analyzing the current screen..."
-		if profile != "" {
+		if workflowName != "" {
+			message = "Capturing and analyzing with workflow `" + workflowName + "`..."
+		} else if profile != "" {
 			message = "Capturing and analyzing with profile `" + profile + "`..."
 		}
 		if err := sendRich(c, message); err != nil {
 			return err
 		}
-		if b.handlers.OnScreen == nil && b.handlers.OnScreenProfile == nil {
+		if b.handlers.OnScreen == nil && b.handlers.OnScreenProfile == nil && b.handlers.OnScreenWorkflow == nil {
 			return sendRich(c, "Screen capture is not configured.")
 		}
 		var err error
-		if b.handlers.OnScreenProfile != nil {
+		if workflowName != "" && b.handlers.OnScreenWorkflow != nil {
+			err = b.handlers.OnScreenWorkflow(b.handlerContext(), target, workflowName)
+		} else if workflowName != "" {
+			err = fmt.Errorf("workflow selection is not configured")
+		} else if b.handlers.OnScreenProfile != nil {
 			err = b.handlers.OnScreenProfile(b.handlerContext(), target, profile)
 		} else {
 			err = b.handlers.OnScreen(b.handlerContext(), target)
@@ -191,6 +206,16 @@ func (b *Bot) registerHandlers() {
 			return sendRich(c, "Unable to queue capture: "+err.Error())
 		}
 		return nil
+	})
+
+	b.bot.Handle("/"+commandWorkflow, func(c tele.Context) error {
+		if !b.authorized(c) {
+			return nil
+		}
+		if b.handlers.Workflows == nil {
+			return sendRich(c, "Analysis workflows are not configured.")
+		}
+		return sendRich(c, b.handlers.Workflows())
 	})
 
 	b.bot.Handle("/"+commandReload, func(c tele.Context) error {
@@ -244,8 +269,18 @@ func (b *Bot) registerHandlers() {
 		if !b.authorized(c) {
 			return nil
 		}
-		return sendRichHTML(c, `<h1>ScreenLens commands</h1><ul><li><code>/screen [profile]</code> - capture and analyze the current screen</li><li><code>/agent</code> - list local agent profiles</li><li><code>/cancel</code> - cancel the active capture</li><li><code>/reload</code> - reload configuration</li><li><code>/status</code> - show runtime status</li><li><code>/help</code> - show this help</li></ul>`)
+		return sendRichHTML(c, `<h1>ScreenLens commands</h1><ul><li><code>/screen [profile]</code> - capture and analyze the current screen</li><li><code>/screen workflow:&lt;name&gt;</code> - run a configured workflow</li><li><code>/agent</code> - list local agent profiles</li><li><code>/workflow</code> - list configured workflows</li><li><code>/cancel</code> - cancel the active capture</li><li><code>/reload</code> - reload configuration</li><li><code>/status</code> - show runtime status</li><li><code>/help</code> - show this help</li></ul>`)
 	})
+}
+
+func parseWorkflowPayload(payload string) string {
+	payload = strings.TrimSpace(payload)
+	for _, prefix := range []string{"workflow:", "workflow="} {
+		if strings.HasPrefix(strings.ToLower(payload), prefix) {
+			return strings.TrimSpace(payload[len(prefix):])
+		}
+	}
+	return ""
 }
 
 func sendRich(c tele.Context, text string) error {

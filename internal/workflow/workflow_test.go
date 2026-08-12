@@ -225,6 +225,34 @@ func TestCaptureCanSelectResolverProfile(t *testing.T) {
 	}
 }
 
+func TestCaptureCanSelectResolverWorkflow(t *testing.T) {
+	sender := &recordingSender{done: make(chan struct{}, 1)}
+	backend := resultAnalyzer{provider: "workflow", text: "final solution"}
+	engine := NewAnalyzer(recordingCapture{}, resultAnalyzer{provider: "vision", text: "default"}, sender, "prompt", false, "vision", nil)
+	engine.SetWorkflowResolver(func(name string) (analyzer.Analyzer, string, error) {
+		if name != "screen-solution" {
+			t.Fatalf("workflow = %q", name)
+		}
+		return backend, "workflow:screen-solution", nil
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = engine.Run(ctx) }()
+	if err := engine.CaptureFromWorkflow(ctx, "123", "telegram", "screen-solution"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-sender.done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for workflow result")
+	}
+	waitUntilIdle(t, engine)
+	status := engine.Status()
+	if status.Workflow != "screen-solution" || status.Backend != "workflow" {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
 type resultAnalyzer struct {
 	provider string
 	text     string
