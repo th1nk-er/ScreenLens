@@ -8,10 +8,15 @@ import (
 	"syscall"
 )
 
-const createNewProcessGroup = 0x00000200
+const (
+	createNewProcessGroup = 0x00000200
+	createNoWindow        = 0x08000000
+)
 
 func configureCommand(command *exec.Cmd) {
-	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNewProcessGroup}
+	command.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: createNewProcessGroup | createNoWindow,
+	}
 }
 
 func killProcessTree(command *exec.Cmd) {
