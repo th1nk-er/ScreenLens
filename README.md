@@ -272,8 +272,11 @@ YAML values support `${ENV_VAR}` expansion. Keep tokens and API keys in the envi
 
 ## Interaction
 
-Region screenshot shortcuts are configured with `hotkey.region_start`, `hotkey.region_end`, and `hotkey.region_capture`. The first two record the current mouse position; the third captures the rectangle formed by the last two points. Points are retained for reuse, their order does not matter, and no selection overlay is shown.
+Region screenshots use the last two recorded mouse positions and do not show a selection overlay.
 
+- `ALT+SHIFT+S` — set the region start point.
+- `ALT+SHIFT+E` — set the region end point.
+- `ALT+SHIFT+C` — capture the selected region.
 - `CTRL+SHIFT+S` — capture using the configured hotkey.
 - `MOUSE_X1` / `MOUSE_X2` — optional side-button capture aliases.
 - `/screen` — capture with the active profile.
